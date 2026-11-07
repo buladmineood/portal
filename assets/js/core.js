@@ -62,17 +62,16 @@ export function tracker(status) {
 }
 
 export function brandHeader({ tag, user } = {}) {
-  const right = user
-    ? h('div', { class: 'user' },
-        h('span', { class: 'user__name' }, user),
-        h('button', {
-          class: 'btn btn--ghost btn--small', type: 'button',
-          onclick: async () => {
-            await api('/auth/logout', { method: 'POST' }).catch(() => {});
-            location.href = '/';
-          },
-        }, 'Изход'))
-    : null;
+  const right = h('div', { class: 'user' },
+    user && h('span', { class: 'user__name' }, user),
+    window.baTheme?.button('icon-btn'),
+    user && h('button', {
+      class: 'btn btn--ghost btn--small', type: 'button',
+      onclick: async () => {
+        await api('/auth/logout', { method: 'POST' }).catch(() => {});
+        location.href = '/';
+      },
+    }, 'Изход'));
   return h('header', { class: 'site-header' },
     h('div', { class: 'wrap site-header__inner' },
       h('a', { class: 'brand', href: '/' },
@@ -276,6 +275,9 @@ const ICONS = {
   clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20M12 6v6l4 2',
   alert: 'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0',
   arrow: 'M5 12h14M13 6l6 6-6 6',
+  menu: 'M4 7h16M4 12h16M4 17h16',
+  close: 'M18 6L6 18M6 6l12 12',
+  refresh: 'M21 12a9 9 0 1 1-2.6-6.4L21 8M21 3v5h-5',
   back: 'M19 12H5M11 18l-6-6 6-6',
   copy: 'M9 9h11a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2zM5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1',
   send: 'M22 2L11 13M22 2l-7 20-4-9-9-4z',
@@ -400,40 +402,84 @@ export const pageHead = (title, subtitle, ...actions) => h('header', { class: 'p
 
 export function mountShell({ tag, user, detail, nav }) {
   const main = h('main', { class: 'app__main', id: 'main', tabindex: '-1' });
+  main.addEventListener('input', markDirty);
   const navList = h('ul', { class: 'app__nav-list' });
   const logout = async () => {
     await api('/auth/logout', { method: 'POST' }).catch(() => {});
     location.href = '/';
   };
+  const liveText = h('span', {}, 'Обновява се автоматично');
+  const live = h('div', { class: 'app__live', role: 'status' }, h('span', { class: 'live-dot', 'aria-hidden': 'true' }), liveText);
   const brand = () => h('a', { class: 'brand brand--light', href: '#/' },
     h('span', { class: 'brand__tile' }, h('img', { src: '/assets/img/logo-mark.webp', alt: '', width: 28, height: 28 })),
     h('span', { class: 'brand__word' }, 'БУЛ', h('b', {}, 'АДМИН')));
   const shell = h('div', { class: 'app' },
     h('header', { class: 'app__top' },
       brand(),
-      h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Изход', title: 'Изход', onclick: logout }, icon('logout', 20))),
+      h('div', { class: 'app__top-actions' },
+        window.baTheme?.button('icon-btn icon-btn--light'),
+        h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Изход', title: 'Изход', onclick: logout }, icon('logout', 20)))),
     h('aside', { class: 'app__side' },
       h('div', { class: 'app__brand' }, brand(), tag && h('span', { class: 'app__tag' }, tag)),
       h('nav', { class: 'app__nav', 'aria-label': 'Основно меню' }, navList),
+      live,
       h('div', { class: 'app__user' },
         h('div', { class: 'app__user-text' }, h('strong', {}, user), detail && h('span', {}, detail)),
-        h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Изход', title: 'Изход', onclick: logout }, icon('logout', 20)))),
+        h('div', { class: 'app__user-actions' },
+          window.baTheme?.button('icon-btn icon-btn--light'),
+          h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Изход', title: 'Изход', onclick: logout }, icon('logout', 20))))),
     main);
   document.body.replaceChildren(shell);
 
   let badges = {};
+  const currentPath = () => location.hash.replace(/^#/, '').split('?')[0] || '/';
+  const countBadge = (count) => count > 0 && h('span', { class: 'badge', 'aria-label': `${count} чакащи` }, String(count));
+
+  // На телефон се виждат до 5 бутона; останалите раздели са в „Още“.
+  function openMore(items) {
+    const close = () => {
+      sheet.close();
+      sheet.remove();
+    };
+    const sheet = h('dialog', { class: 'sheet', 'aria-label': 'Още раздели' },
+      h('div', { class: 'sheet__head' },
+        h('span', {}, 'Още'),
+        h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Затвори', onclick: close }, icon('close', 20))),
+      h('ul', {}, items.map((item) => {
+        const active = item.match.test(currentPath());
+        return h('li', {}, h('a', { href: item.href, class: active ? 'is-active' : '', 'aria-current': active ? 'page' : null, onclick: close },
+          icon(item.icon), h('span', {}, item.label), countBadge(badges[item.key])));
+      })));
+    sheet.addEventListener('click', (event) => {
+      if (event.target === sheet) close();
+    });
+    sheet.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      close();
+    });
+    document.body.append(sheet);
+    sheet.showModal();
+  }
+
   const render = () => {
-    const path = location.hash.replace(/^#/, '').split('?')[0] || '/';
-    navList.replaceChildren(...nav().map((item) => {
+    const path = currentPath();
+    const items = nav();
+    const secondary = items.length > 5 ? items.slice(4) : [];
+    const rows = items.map((item) => {
       const active = item.match.test(path);
-      const count = badges[item.key];
-      return h('li', {}, h('a', { href: item.href, class: active ? 'is-active' : '', 'aria-current': active ? 'page' : null },
+      return h('li', { class: secondary.includes(item) ? 'is-secondary' : '' }, h('a', { href: item.href, class: active ? 'is-active' : '', 'aria-current': active ? 'page' : null },
         icon(item.icon),
         h('span', { class: 'app__nav-label' }, item.label),
-        count > 0 && h('span', { class: 'badge', 'aria-label': `${count} чакащи` }, String(count))));
-    }));
-    // На телефон менюто се превърта хоризонтално: активният раздел остава видим.
-    navList.querySelector('.is-active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        countBadge(badges[item.key])));
+    });
+    if (secondary.length) {
+      const waiting = secondary.reduce((sum, item) => sum + (badges[item.key] || 0), 0);
+      rows.push(h('li', { class: 'app__nav-more' }, h('button', {
+        type: 'button', class: secondary.some((item) => item.match.test(path)) ? 'is-active' : '', 'aria-haspopup': 'dialog',
+        onclick: () => openMore(secondary),
+      }, icon('menu'), h('span', {}, 'Още'), countBadge(waiting))));
+    }
+    navList.replaceChildren(...rows);
   };
   render();
   window.addEventListener('hashchange', render);
@@ -444,7 +490,72 @@ export function mountShell({ tag, user, detail, nav }) {
       badges = next;
       render();
     },
+    setOnline: (online) => {
+      live.classList.toggle('is-offline', !online);
+      liveText.textContent = online ? 'Обновява се автоматично' : 'Няма връзка. Опитваме отново';
+    },
   };
+}
+
+// --- Автоматично опресняване ---
+
+let dirty = false;
+let updateBar;
+
+// Въведен текст или показано пълно ЕГН не бива да изчезват при опресняване.
+export function markDirty() {
+  dirty = true;
+}
+export function hideUpdateBar() {
+  updateBar?.remove();
+  updateBar = null;
+}
+export function markClean() {
+  dirty = false;
+  hideUpdateBar();
+}
+export function canRefreshNow() {
+  return !dirty
+    && !document.querySelector('dialog[open], .link-box')
+    && !document.activeElement?.matches?.('input, textarea, select');
+}
+export function showUpdateBar(onRefresh) {
+  hideUpdateBar();
+  updateBar = h('button', {
+    class: 'update-bar', type: 'button',
+    onclick: async () => {
+      markClean();
+      await onRefresh();
+    },
+  }, icon('refresh', 16), 'Има нови данни. Обновете');
+  document.body.append(updateBar);
+}
+
+// Проверява през интервал само докато разделът е видим, за да не товари излишно.
+export function startLive({ intervalMs, tick, onOnline, loginUrl }) {
+  let running = false;
+  let failures = 0;
+  const run = async () => {
+    if (document.hidden || running) return;
+    running = true;
+    try {
+      await tick();
+      failures = 0;
+      onOnline(true);
+    } catch (err) {
+      if (err.status === 401) {
+        location.replace(loginUrl);
+        return;
+      }
+      failures += 1;
+      if (failures >= 2) onOnline(false);
+    } finally {
+      running = false;
+    }
+  };
+  setInterval(run, intervalMs);
+  document.addEventListener('visibilitychange', run);
+  window.addEventListener('online', run);
 }
 
 export function fatal(main, err) {

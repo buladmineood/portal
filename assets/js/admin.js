@@ -1,6 +1,7 @@
 import {
-  api, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatTime, formValues, h, icon, identityFields, linkBox, loginLabel,
-  mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, statusPill, timeAgo, toast,
+  api, canRefreshNow, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatTime, formValues, h, icon, identityFields, linkBox,
+  loginLabel, markClean, markDirty, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill,
+  timeAgo, toast,
 } from './core.js';
 
 let shell;
@@ -8,6 +9,10 @@ let main;
 let meta;
 let me;
 let data;
+let silent = false; // опресняване на заден план: без индикатор за зареждане и без местене на екрана
+let lastOverview = '';
+let lastDetail = { key: '', sig: '' };
+const LIVE_INTERVAL_MS = 20_000;
 
 const PAGE_SIZE = 25;
 const PRIVACY_CLOSED = ['Изпълнено', 'Отказано'];
@@ -26,9 +31,12 @@ const daysLeft = (iso) => Math.ceil((Date.parse(iso) - Date.now()) / 864e5);
 
 function page(...children) {
   main.replaceChildren(h('div', { class: 'page page--wide' }, children));
-  main.focus({ preventScroll: true });
+  markClean();
+  if (!silent) main.focus({ preventScroll: true });
 }
-const loading = () => main.replaceChildren(h('div', { class: 'loading' }, 'Зареждане…'));
+function loading() {
+  if (!silent) main.replaceChildren(h('div', { class: 'loading' }, 'Зареждане…'));
+}
 
 function syncBadges() {
   shell.setBadges({
@@ -414,6 +422,7 @@ async function viewClient(id) {
         const { egn, representativeEgn } = await api(`${url}/egn`, { method: 'POST' });
         egnValue.textContent = egn || representativeEgn;
         reveal.remove();
+        markDirty();
       } catch (err) {
         toast(err.message, 'error');
       }
@@ -559,6 +568,7 @@ function viewChanges() {
           const { values } = await api(`/admin/changes/${encodeURIComponent(change.id)}/reveal`, { method: 'POST' });
           for (const [key, value] of Object.entries(values)) toCells.get(key).textContent = value;
           reveal.remove();
+          markDirty();
         } catch (err) {
           toast(err.message, 'error');
         }
@@ -744,13 +754,13 @@ async function route() {
   const [path, queryText] = hash.split('?');
   const requestMatch = path.match(/^\/r\/([\w-]+)$/);
   const clientMatch = path.match(/^\/c\/([\w-]+)$/);
-  window.scrollTo(0, 0);
+  if (!silent) window.scrollTo(0, 0);
   try {
     if (requestMatch) return await viewRequest(requestMatch[1]);
     if (clientMatch) return await viewClient(clientMatch[1]);
     loading();
-    await refresh();
-    if (path === '/requests') viewRequests(queryText !== undefined ? new URLSearchParams(queryText) : null);
+    if (!silent) await refresh();
+    if (path === '/requests') viewRequests(!silent && queryText !== undefined ? new URLSearchParams(queryText) : null);
     else if (path === '/clients') viewClients();
     else if (path === '/changes') viewChanges();
     else if (path === '/privacy' && data.privacy) viewPrivacyRequests();
@@ -761,6 +771,51 @@ async function route() {
     if (err.status === 401) return location.replace('/operator.html');
     fatal(main, err);
   }
+}
+
+async function rerender() {
+  const y = window.scrollY;
+  silent = true;
+  try {
+    await route();
+  } finally {
+    silent = false;
+  }
+  window.scrollTo(0, y);
+}
+
+function detailUrl(path) {
+  const requestMatch = path.match(/^\/r\/([\w-]+)$/);
+  if (requestMatch) return `/admin/requests/${encodeURIComponent(requestMatch[1])}`;
+  const clientMatch = path.match(/^\/c\/([\w-]+)$/);
+  return clientMatch ? `/admin/clients/${encodeURIComponent(clientMatch[1])}` : null;
+}
+
+async function liveTick() {
+  const path = location.hash.replace(/^#/, '').split('?')[0] || '/';
+  const next = await api('/admin/overview');
+  const sig = JSON.stringify(next);
+  const known = new Set(data.requests.map((r) => r.id));
+  const arrivals = next.requests.filter((r) => !known.has(r.id));
+  const overviewChanged = sig !== lastOverview;
+
+  const url = detailUrl(path);
+  let detailChanged = false;
+  if (url) {
+    const detailSig = JSON.stringify(await api(url));
+    detailChanged = lastDetail.key === path && lastDetail.sig !== detailSig;
+    lastDetail = { key: path, sig: detailSig };
+  }
+
+  lastOverview = sig;
+  data = next;
+  syncBadges();
+  if (arrivals.length) toast(arrivals.length === 1 ? `Нова заявка: ${arrivals[0].service}` : `Нови заявки: ${arrivals.length}`);
+
+  const changed = url ? detailChanged : overviewChanged;
+  if (!changed || path === '/me') return;
+  if (canRefreshNow()) await rerender();
+  else showUpdateBar(rerender);
 }
 
 async function init() {
@@ -793,12 +848,10 @@ async function init() {
   });
   main = shell.main;
   syncBadges();
-  window.addEventListener('hashchange', route);
-  // Данните се опресняват, когато операторът се върне в раздела.
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) refresh().catch(() => {});
-  });
+  window.addEventListener('hashchange', () => route());
   await route();
+  lastOverview = JSON.stringify(data);
+  startLive({ intervalMs: LIVE_INTERVAL_MS, tick: liveTick, onOnline: shell.setOnline, loginUrl: '/operator.html' });
 }
 
 init().catch((err) => fatal(mount({ tag: 'Оператори' }), err));

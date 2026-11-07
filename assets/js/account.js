@@ -1,11 +1,15 @@
 import {
-  api, CATEGORY_ICONS, contactFields, copyButton, emptyState, fatal, field, formatDate, formatTime, formValues, h, icon, identityFields, loginLabel,
-  mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, statusPill, timeAgo, toast, tracker,
+  api, canRefreshNow, CATEGORY_ICONS, contactFields, copyButton, emptyState, fatal, field, formatDate, formatTime, formValues, h, icon, identityFields,
+  loginLabel, markClean, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill, timeAgo,
+  toast, tracker,
 } from './core.js';
 
 let main;
 let state;
 let listFilter = { q: '', group: 'active' };
+let silent = false; // опресняване на заден план: без индикатор за зареждане и без местене на екрана
+let lastLive = { key: '', sig: '' };
+const LIVE_INTERVAL_MS = 30_000;
 
 const clientName = (c) => c.companyName || [c.firstName, c.lastName].filter(Boolean).join(' ');
 const isCompany = (c) => !!c.companyName;
@@ -15,10 +19,14 @@ const norm = (s) => String(s || '').toLocaleLowerCase('bg');
 
 function page(...children) {
   main.replaceChildren(h('div', { class: 'page' }, children));
+  markClean();
+  if (silent) return;
   window.scrollTo(0, 0);
   main.focus({ preventScroll: true });
 }
-const loading = () => main.replaceChildren(h('div', { class: 'loading' }, 'Зареждане…'));
+function loading() {
+  if (!silent) main.replaceChildren(h('div', { class: 'loading' }, 'Зареждане…'));
+}
 
 function verificationBanner() {
   if (!state.me.needsEmailVerification) return null;
@@ -380,6 +388,43 @@ async function route() {
   }
 }
 
+async function rerender() {
+  const y = window.scrollY;
+  silent = true;
+  try {
+    await route();
+  } finally {
+    silent = false;
+  }
+  window.scrollTo(0, y);
+}
+
+// Какво се следи зависи от отворения екран. Новата заявка е формуляр на стъпки и не се опреснява.
+function liveSource(path) {
+  const m = path.match(/^\/r\/([\w-]+)$/);
+  if (m) return `/requests/${encodeURIComponent(m[1])}`;
+  if (path === '/') return '/requests';
+  if (path === '/profile') return '/profile/changes';
+  if (path === '/privacy') return '/privacy-requests';
+  return null;
+}
+
+async function liveTick() {
+  const path = location.hash.replace(/^#/, '') || '/';
+  const source = liveSource(path);
+  if (!source) return;
+  const sig = JSON.stringify(await api(source));
+  const changed = lastLive.key === path && lastLive.sig !== sig;
+  lastLive = { key: path, sig };
+  if (!changed) return;
+  if (path === '/profile') {
+    state.me = await api('/me');
+    state.client = state.me.client;
+  }
+  if (canRefreshNow()) await rerender();
+  else showUpdateBar(rerender);
+}
+
 async function init() {
   const me = await api('/me');
   if (!me.authenticated) return location.replace('/');
@@ -398,8 +443,9 @@ async function init() {
     ],
   });
   main = shell.main;
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', () => route());
   await route();
+  startLive({ intervalMs: LIVE_INTERVAL_MS, tick: liveTick, onOnline: shell.setOnline, loginUrl: '/' });
 }
 
 init().catch((err) => fatal(mount({}), err));
