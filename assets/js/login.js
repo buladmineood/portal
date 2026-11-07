@@ -1,4 +1,4 @@
-import { api, h, showError, showFieldErrors } from './core.js';
+import { api, h, showError, showFieldErrors } from './core.js?v=4ddb93421e';
 
 const isOperatorPage = document.body.dataset.role === 'operator';
 const form = document.getElementById('login-form');

@@ -1,4 +1,4 @@
-import { api, showError, showFieldErrors } from './core.js';
+import { api, showError, showFieldErrors } from './core.js?v=4ddb93421e';
 
 const form = document.getElementById('password-form');
 const alert = document.getElementById('form-alert');

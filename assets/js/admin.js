@@ -3,7 +3,7 @@ import {
   identityFields, linkBox,
   loginLabel, markClean, markDirty, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill,
   timeAgo, toast,
-} from './core.js';
+} from './core.js?v=4ddb93421e';
 
 let shell;
 let main;
