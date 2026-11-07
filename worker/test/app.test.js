@@ -4,6 +4,7 @@ import { createApp, SESSION_COOKIE } from '../src/app.js';
 import { b64url, b64urlDecode, clientAssertion, signToken } from '../src/crypto.js';
 import { GraphStore, MemoryStore } from '../src/store.js';
 import { isValidEgnOrLnch, isValidEik, validateRegistration } from '../src/validate.js';
+import { detectFileType } from '../src/files.js';
 
 const ORIGIN = 'https://portal.test';
 const TENANT = 'tenant-1';
@@ -1023,6 +1024,154 @@ test('отдели: създава само администратор, нови
   assert.equal(store.tables.requests.at(-1).department, '');
   const overview = await call(app, 'GET', '/api/admin/overview', { as: 'plain' });
   assert.equal(overview.data.departments[0].isActive, 'Не');
+});
+
+// --- Документи ---
+
+const PDF = new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n');
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+async function upload(app, as, requestId, docId, bytes, name = 'лична карта.pdf', origin = ORIGIN) {
+  const cookie = `${SESSION_COOKIE}=${await signToken(users[as], env.SESSION_SECRET, 3600)}`;
+  const res = await app(new Request(`${ORIGIN}/api/requests/${requestId}/documents/${docId}/files`, {
+    method: 'POST',
+    headers: { cookie, origin, 'content-type': 'application/octet-stream', 'x-file-name': encodeURIComponent(name) },
+    body: bytes,
+  }));
+  return { status: res.status, data: await res.json() };
+}
+async function docSetup() {
+  const { app, store } = setup();
+  const requestId = await withRequest(app);
+  const asked = await call(app, 'POST', `/api/admin/requests/${requestId}/documents`, {
+    as: 'plain', body: { items: [{ docTitle: 'Лична карта', note: 'Двете страни' }, { docTitle: 'Скица' }] },
+  });
+  assert.equal(asked.status, 201);
+  return { app, store, requestId, docs: asked.data.documents };
+}
+
+test('документи: само оператор изисква, клиентът вижда искането', async () => {
+  const { app, store, requestId, docs } = await docSetup();
+  assert.equal((await call(app, 'POST', `/api/admin/requests/${requestId}/documents`, { as: 'alice', body: { items: [{ docTitle: 'X' }] } })).status, 403);
+  assert.equal((await call(app, 'POST', `/api/admin/requests/${requestId}/documents`, { as: 'plain', body: { items: [] } })).status, 422);
+  assert.deepEqual(docs.map((d) => d.docStatus), ['Изискан', 'Изискан']);
+  const view = await call(app, 'GET', `/api/requests/${requestId}`, { as: 'alice' });
+  assert.equal(view.data.documents.length, 2);
+  assert.ok(view.data.events.some((e) => e.action.includes('Изискани документи')));
+  const list = await call(app, 'GET', '/api/requests', { as: 'alice' });
+  assert.equal(list.data.requests[0].documentsWaiting, 2);
+  void store;
+});
+
+test('документи: качване, проверка на вида, изпращане и заключване', async () => {
+  const { app, store, requestId, docs } = await docSetup();
+  const [card, sketch] = docs;
+  await registered(app, 'bob');
+  assert.equal((await upload(app, 'bob', requestId, card.id, PDF)).status, 404); // чужда заявка
+  assert.equal((await upload(app, 'alice', requestId, card.id, new TextEncoder().encode('<html><script>alert(1)</script></html>'), 'x.pdf')).status, 415);
+  assert.equal((await upload(app, 'alice', requestId, card.id, PDF, 'x.pdf', 'https://evil.test')).status, 403);
+  const big = new Uint8Array(10 * 1024 * 1024 + 1); big.set(PDF);
+  assert.equal((await upload(app, 'alice', requestId, card.id, big)).status, 413);
+
+  const first = await upload(app, 'alice', requestId, card.id, PDF, '../../лична карта.pdf');
+  assert.equal(first.status, 201);
+  assert.ok(!/[/\\]/.test(first.data.file.fileName), 'името не съдържа път');
+  assert.ok(first.data.file.fileName.endsWith('лична карта.pdf'));
+  assert.equal(first.data.file.mimeType, 'application/pdf');
+  const [blob] = [...store.blobs.values()];
+  assert.ok(blob.path.startsWith(`Портал/Документи/${requestId}/F-`) && blob.path.endsWith('.pdf'));
+
+  // Не може да се изпрати, докато всеки документ няма файл.
+  const early = await call(app, 'POST', `/api/requests/${requestId}/documents/submit`, { as: 'alice' });
+  assert.equal(early.status, 422);
+  assert.ok(early.data.error.message.includes('Скица'));
+  assert.equal((await upload(app, 'alice', requestId, sketch.id, PNG, 'скица.png')).status, 201);
+  // Чернова може да се изтрие преди изпращане.
+  const extra = await upload(app, 'alice', requestId, sketch.id, PNG, 'грешна.png');
+  assert.equal((await call(app, 'DELETE', `/api/requests/${requestId}/files/${extra.data.file.id}`, { as: 'alice' })).status, 200);
+  assert.equal(store.blobs.size, 2); // файлът е изтрит и от библиотеката
+  const afterDelete = await call(app, 'GET', `/api/requests/${requestId}`, { as: 'alice' });
+  assert.ok(!afterDelete.data.files.some((f) => f.fileName === 'грешна.png'), 'изтритият файл не се показва');
+
+  const sent = await call(app, 'POST', `/api/requests/${requestId}/documents/submit`, { as: 'alice' });
+  assert.equal(sent.status, 200);
+  assert.deepEqual(sent.data.documents.map((d) => d.docStatus), ['Изпратен', 'Изпратен']);
+  // След изпращане: без качване и без изтриване.
+  assert.equal((await upload(app, 'alice', requestId, card.id, PDF)).status, 409);
+  assert.equal((await call(app, 'DELETE', `/api/requests/${requestId}/files/${first.data.file.id}`, { as: 'alice' })).status, 409);
+  assert.equal((await call(app, 'POST', `/api/requests/${requestId}/documents/submit`, { as: 'alice' })).status, 409);
+});
+
+test('документи: корекция отключва само този документ; старият файл остава за история', async () => {
+  const { app, store, requestId, docs } = await docSetup();
+  const [card, sketch] = docs;
+  const old = await upload(app, 'alice', requestId, card.id, PDF);
+  await upload(app, 'alice', requestId, sketch.id, PNG, 'скица.png');
+  await call(app, 'POST', `/api/requests/${requestId}/documents/submit`, { as: 'alice' });
+
+  assert.equal((await call(app, 'POST', `/api/admin/documents/${card.id}/review`, { as: 'plain', body: { decision: 'correction' } })).status, 422);
+  const back = await call(app, 'POST', `/api/admin/documents/${card.id}/review`, { as: 'plain', body: { decision: 'correction', reason: 'Не се чете.' } });
+  assert.equal(back.data.documents.find((d) => d.id === card.id).docStatus, 'Нужна корекция');
+  await call(app, 'POST', `/api/admin/documents/${sketch.id}/review`, { as: 'plain', body: { decision: 'accept' } });
+
+  assert.equal((await upload(app, 'alice', requestId, sketch.id, PNG)).status, 409); // приетият е заключен
+  const fresh = await upload(app, 'alice', requestId, card.id, PDF, 'нова.pdf');
+  assert.equal(fresh.status, 201);
+  assert.equal(fresh.data.file.round, 2);
+  await call(app, 'POST', `/api/requests/${requestId}/documents/submit`, { as: 'alice' });
+  const files = store.tables.files.filter((f) => f.docId === card.id);
+  assert.equal(files.find((f) => f.id === old.data.file.id).fileStatus, 'Заменен');
+  assert.equal(files.find((f) => f.id === fresh.data.file.id).fileStatus, 'Изпратен');
+  const view = await call(app, 'GET', `/api/requests/${requestId}`, { as: 'alice' });
+  assert.ok(view.data.events.some((e) => e.message === 'Не се чете.'));
+});
+
+test('документи: изтегляне с права, като прикачен файл и без изпълнение', async () => {
+  const { app, requestId, docs } = await docSetup();
+  const up = await upload(app, 'alice', requestId, docs[0].id, PDF, 'карта „нова“.pdf');
+  const get = async (path, as) => app(new Request(`${ORIGIN}${path}`, {
+    headers: { cookie: `${SESSION_COOKIE}=${await signToken(users[as], env.SESSION_SECRET, 3600)}` },
+  }));
+  const own = await get(`/api/files/${up.data.file.id}`, 'alice');
+  assert.equal(own.status, 200);
+  assert.equal(own.headers.get('content-type'), 'application/pdf');
+  assert.ok(own.headers.get('content-disposition').startsWith('attachment;'));
+  assert.ok(own.headers.get('content-disposition').includes("filename*=UTF-8''"));
+  assert.ok(own.headers.get('content-security-policy').includes('sandbox'));
+  assert.deepEqual(new Uint8Array(await own.arrayBuffer()), PDF);
+  await registered(app, 'bob');
+  assert.equal((await get(`/api/files/${up.data.file.id}`, 'bob')).status, 404);
+  assert.equal((await get(`/api/admin/files/${up.data.file.id}`, 'alice')).status, 403);
+  assert.equal((await get(`/api/admin/files/${up.data.file.id}`, 'plain')).status, 200);
+});
+
+test('документи: отменен документ не пречи на изпращането; таблото брои за преглед', async () => {
+  const { app, requestId, docs } = await docSetup();
+  await call(app, 'POST', `/api/admin/documents/${docs[1].id}/review`, { as: 'plain', body: { decision: 'cancel' } });
+  await upload(app, 'alice', requestId, docs[0].id, PDF);
+  assert.equal((await call(app, 'POST', `/api/requests/${requestId}/documents/submit`, { as: 'alice' })).status, 200);
+  const overview = await call(app, 'GET', '/api/admin/overview', { as: 'plain' });
+  assert.equal(overview.data.documentsToReview.length, 1);
+});
+
+test('вид на файла: по съдържанието, не по името', () => {
+  assert.equal(detectFileType(PDF, 'x.exe').ext, 'pdf');
+  assert.equal(detectFileType(PNG, 'x.pdf').ext, 'png');
+  assert.equal(detectFileType(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]), 'a').ext, 'jpg');
+  assert.equal(detectFileType(new TextEncoder().encode('MZ\x90\x00 this is an exe file'), 'a.pdf'), null);
+  assert.equal(detectFileType(new TextEncoder().encode('PK\x03\x04 [Content_Types].xml word/document.xml'), 'a.zip'), null);
+  assert.equal(detectFileType(new TextEncoder().encode('PK\x03\x04 [Content_Types].xml word/document.xml'), 'a.docx').ext, 'docx');
+});
+
+// --- Адреси ---
+
+test('адрес: областта и общината трябва да си съответстват', () => {
+  const base = { ...individual, region: 'Русе', municipality: 'Русе', city: 'Русе', postalCode: '7000' };
+  assert.deepEqual(validateRegistration(base).errors, {});
+  assert.ok(validateRegistration({ ...base, region: 'Несъществуваща' }).errors.region);
+  assert.ok(validateRegistration({ ...base, municipality: 'Варна' }).errors.municipality);
+  assert.ok(validateRegistration({ ...base, postalCode: '70' }).errors.postalCode);
+  assert.deepEqual(validateRegistration({ ...base, region: '', municipality: '', postalCode: '' }).errors, {}); // адрес в чужбина
+  assert.equal(validateRegistration(base).fields.postalCode, '7000');
 });
 
 // --- Ограничение на опитите ---

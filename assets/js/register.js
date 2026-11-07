@@ -31,7 +31,7 @@ async function init() {
   }
 
   const contact = contactFields({ contactEmail: me.identity.email });
-  const addressLabel = contact[3].querySelector('label');
+  const addressLabel = contact[2].querySelector('legend');
 
   const submit = h('button', { class: 'btn', type: 'submit' }, 'Завършете регистрацията');
   const form = h('form', { class: 'form', novalidate: true },

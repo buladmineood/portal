@@ -1,5 +1,6 @@
 import {
-  api, canRefreshNow, CATEGORY_ICONS, contactFields, copyButton, emptyState, fatal, field, formatDate, formatTime, formValues, h, icon, identityFields,
+  api, canRefreshNow, CATEGORY_ICONS, confirmDialog, contactFields, copyButton, emptyState, fatal, field, formatDate, formatSize, formatTime, formValues, h,
+  icon, identityFields, uploadFile,
   loginLabel, markClean, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill, timeAgo,
   toast, tracker,
 } from './core.js';
@@ -55,6 +56,7 @@ const requestCard = (r) => h('a', { class: 'req-card', href: `#/r/${r.id}` },
       h('span', { class: 'req-card__title' }, r.service),
       statusPill(r.requestStatus)),
     h('span', { class: 'req-card__meta' }, `${r.serviceCategory} · № ${r.id} · ${timeAgo(r.updatedAt || r.createdAt)}`),
+    r.documentsWaiting > 0 && h('span', { class: 'req-card__alert' }, icon('doc', 16), r.documentsWaiting === 1 ? 'Очаква се 1 документ от Вас' : `Очакват се ${r.documentsWaiting} документа от Вас`),
     progress(r.requestStatus)));
 
 async function viewHome() {
@@ -216,9 +218,122 @@ function eventLine(e) {
   return e.action;
 }
 
+// --- Документи, поискани от оператора ---
+
+const OPEN_DOC = ['Изискан', 'Нужна корекция'];
+const ACCEPT = '.pdf,.jpg,.jpeg,.png,.heic,.heif,.docx,application/pdf,image/jpeg,image/png,image/heic';
+const MAX_BYTES = 10 * 1024 * 1024;
+
+function documentsSection(requestId, documents, files) {
+  if (!documents.length) return null;
+  const reload = async () => {
+    const y = window.scrollY;
+    await viewRequest(requestId);
+    window.scrollTo(0, y);
+  };
+  const current = (doc, status) => files.filter((f) => f.docId === doc.id && f.round === doc.round && f.fileStatus === status);
+  const open = documents.filter((d) => OPEN_DOC.includes(d.docStatus));
+  const ready = open.every((d) => current(d, 'Чернова').length > 0);
+
+  const fileRow = (f, removable) => h('li', { class: 'file-row' },
+    icon('doc', 18),
+    h('span', { class: 'file-row__name' },
+      h('a', { href: `/api/files/${f.id}`, download: f.fileName }, f.fileName),
+      h('span', { class: 'small muted' }, ` · ${formatSize(f.size)}`)),
+    removable && h('button', {
+      class: 'icon-btn', type: 'button', 'aria-label': `Премахнете ${f.fileName}`, title: 'Премахнете',
+      onclick: async () => {
+        try {
+          await api(`/requests/${encodeURIComponent(requestId)}/files/${encodeURIComponent(f.id)}`, { method: 'DELETE' });
+          await reload();
+        } catch (err) {
+          toast(err.message, 'error');
+        }
+      },
+    }, icon('close', 16)));
+
+  const uploader = (doc) => {
+    const status = h('div', { class: 'small', 'aria-live': 'polite' });
+    const input = h('input', { type: 'file', multiple: true, accept: ACCEPT, id: `file-${doc.id}`, class: 'sr-only' });
+    const send = async (list) => {
+      const chosen = [...list];
+      for (const [i, file] of chosen.entries()) {
+        if (file.size > MAX_BYTES) {
+          toast(`${file.name}: файлът е над 10 MB.`, 'error');
+          continue;
+        }
+        status.textContent = `Качва се ${i + 1} от ${chosen.length}: ${file.name}…`;
+        try {
+          await uploadFile(`/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(doc.id)}/files`, file);
+        } catch (err) {
+          toast(`${file.name}: ${err.message}`, 'error');
+        }
+      }
+      await reload();
+    };
+    input.addEventListener('change', () => send(input.files));
+    const zone = h('label', { class: 'dropzone', for: input.id },
+      icon('plus', 20),
+      h('span', {}, h('strong', {}, 'Изберете файлове'), ' или ги пуснете тук'),
+      h('span', { class: 'small muted' }, 'PDF, JPG, PNG, HEIC или DOCX · до 10 MB'));
+    zone.addEventListener('dragover', (event) => { event.preventDefault(); zone.classList.add('is-over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('is-over'));
+    zone.addEventListener('drop', (event) => {
+      event.preventDefault();
+      zone.classList.remove('is-over');
+      send(event.dataTransfer.files);
+    });
+    return h('div', { class: 'stack-tight' }, input, zone, status);
+  };
+
+  const submit = h('button', {
+    class: 'btn', type: 'button', disabled: !ready,
+    onclick: async () => {
+      const yes = await confirmDialog({
+        title: 'Изпращане на документите',
+        text: 'След изпращане не можете да променяте файловете. Ще можете да качите отново само ако служител поиска корекция или нов документ.',
+        confirmLabel: 'Изпратете',
+      });
+      if (!yes) return;
+      try {
+        await api(`/requests/${encodeURIComponent(requestId)}/documents/submit`, { method: 'POST' });
+        toast('Документите са изпратени.');
+        await reload();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    },
+  }, icon('send', 18), 'Изпратете документите');
+
+  return h('section', { class: `card stack ${open.length ? 'card--attention' : ''}`, id: 'documents', 'aria-labelledby': 'docs-title' },
+    h('div', { class: 'card__head card__head--plain' },
+      h('h2', { id: 'docs-title' }, 'Документи'),
+      open.length > 0 && h('span', { class: 'pill', 'data-doc': 'Изискан' }, `Очакват се: ${open.length}`)),
+    open.length > 0 && h('p', { class: 'small muted' }, 'Качете поисканите документи и натиснете „Изпратете документите“. Преди изпращане можете да премахвате и добавяте файлове.'),
+    h('ol', { class: 'doc-list' }, documents.map((doc) => {
+      const isOpen = OPEN_DOC.includes(doc.docStatus);
+      const drafts = current(doc, 'Чернова');
+      const sent = files.filter((f) => f.docId === doc.id && f.fileStatus === 'Изпратен');
+      const older = files.filter((f) => f.docId === doc.id && f.fileStatus === 'Заменен');
+      return h('li', { class: 'doc' },
+        h('div', { class: 'doc__head' },
+          h('strong', {}, doc.docTitle),
+          h('span', { class: 'pill', 'data-doc': doc.docStatus }, doc.docStatus)),
+        doc.note && h('p', { class: 'small muted' }, doc.note),
+        doc.docStatus === 'Нужна корекция' && h('div', { class: 'alert alert--warn small' }, h('strong', {}, 'Какво да поправите: '), doc.reason),
+        sent.length > 0 && h('ul', { class: 'file-list' }, sent.map((f) => fileRow(f, false))),
+        isOpen && drafts.length > 0 && h('ul', { class: 'file-list file-list--draft' }, drafts.map((f) => fileRow(f, true))),
+        isOpen && uploader(doc),
+        older.length > 0 && h('details', { class: 'small' }, h('summary', {}, `Предишни версии (${older.length})`),
+          h('ul', { class: 'file-list' }, older.map((f) => fileRow(f, false)))));
+    })),
+    open.length > 0 && h('div', { class: 'row' }, submit,
+      !ready && h('span', { class: 'small muted' }, 'Качете поне един файл за всеки документ.')));
+}
+
 async function viewRequest(id) {
   loading();
-  const { request: r, events } = await api(`/requests/${encodeURIComponent(id)}`);
+  const { request: r, events, documents = [], files = [] } = await api(`/requests/${encodeURIComponent(id)}`);
   const alert = h('div', { 'aria-live': 'polite' });
   const send = h('button', { class: 'btn', type: 'submit' }, icon('send', 18), 'Изпратете');
   const textarea = h('textarea', { id: 'f-message', name: 'message', maxlength: 2000, placeholder: 'Напишете съобщение до БУЛАДМИН' });
@@ -248,6 +363,7 @@ async function viewRequest(id) {
     h('div', { class: 'split' },
       h('div', { class: 'stack' },
         h('div', { class: 'card stack' }, tracker(r.requestStatus), h('p', { class: 'pre' }, r.details)),
+        documentsSection(id, documents, files),
         h('section', { class: 'stack', 'aria-labelledby': 'history-title' },
           h('h2', { id: 'history-title' }, 'Разговор и история'),
           h('ol', { class: 'timeline' }, events.map((e) =>
@@ -278,7 +394,7 @@ async function viewProfile() {
   const alert = h('div', { 'aria-live': 'polite' });
   const submit = h('button', { class: 'btn', type: 'submit' }, 'Запазете');
   const contact = contactFields(c);
-  if (isCompany(c)) contact[3].querySelector('label').textContent = 'Седалище и адрес на управление';
+  if (isCompany(c)) contact[2].querySelector('legend').textContent = 'Седалище и адрес на управление';
   const form = h('form', { class: 'form', novalidate: true },
     identityFields(isCompany(c) ? 'company' : 'individual', c),
     h('div', { class: 'form__grid' }, contact),

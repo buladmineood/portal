@@ -110,14 +110,203 @@ export function field({ name, label, hint, type = 'text', value = '', required =
     h('input', { id, name, type, value, required, autocomplete, inputmode, maxlength, placeholder }));
 }
 
+// Телефон, имейл и адрес. Третият елемент е блокът с адреса; заглавието му се сменя за фирми.
 export function contactFields(values = {}) {
   return [
     field({ name: 'phone', label: 'Телефон', type: 'tel', value: values.phone, required: true, autocomplete: 'tel', placeholder: '+359 888 123 456', maxlength: 30 }),
     field({ name: 'contactEmail', label: 'Имейл за контакт', type: 'email', value: values.contactEmail, required: true, autocomplete: 'email', maxlength: 200 }),
-    field({ name: 'city', label: 'Град', value: values.city, required: true, autocomplete: 'address-level2', maxlength: 100 }),
-    field({ name: 'address', label: 'Адрес', value: values.address, required: true, autocomplete: 'street-address', maxlength: 200 }),
+    addressFields(values),
   ];
 }
+
+// --- Адрес: области, общини, населени места и пощенски кодове ---
+
+let placesPromise;
+const lower = (s) => String(s || '').toLocaleLowerCase('bg');
+
+// Справочникът се зарежда веднъж, при първото поле за адрес (около 45 KB).
+export function loadPlaces() {
+  placesPromise ??= fetch('/assets/data/places.json')
+    .then((res) => res.json())
+    .then((raw) => {
+      const municipalities = raw.municipalities.map(([name, r]) => ({ name, region: raw.regions[r] }));
+      const places = raw.places.map(([name, m, codes]) => ({
+        name, key: lower(name), municipality: municipalities[m].name, region: municipalities[m].region, codes,
+      }));
+      const collator = new Intl.Collator('bg');
+      return {
+        regions: [...raw.regions].sort(collator.compare),
+        municipalitiesOf: (region) => municipalities.filter((m) => m.region === region).map((m) => m.name).sort(collator.compare),
+        places,
+      };
+    })
+    .catch(() => null);
+  return placesPromise;
+}
+
+// Достъпно падащо меню с предложения (роля combobox), управляемо и с клавиатура.
+function combobox(input, { search, render, onPick }) {
+  const list = h('ul', { class: 'combo__list', role: 'listbox', id: `${input.id}-list`, hidden: true });
+  let items = [];
+  let active = -1;
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-autocomplete', 'list');
+  input.setAttribute('aria-controls', list.id);
+  input.setAttribute('aria-expanded', 'false');
+  input.setAttribute('autocomplete', 'off');
+
+  const close = () => {
+    list.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+    active = -1;
+  };
+  const highlight = (index) => {
+    active = index;
+    [...list.children].forEach((li, i) => li.setAttribute('aria-selected', String(i === index)));
+    if (index >= 0) {
+      input.setAttribute('aria-activedescendant', list.children[index].id);
+      list.children[index].scrollIntoView({ block: 'nearest' });
+    }
+  };
+  const pick = (item) => {
+    onPick(item);
+    close();
+  };
+  let latest = 0;
+  const update = async () => {
+    // При бързо писане по-старо търсене може да завърши след по-новото; показва се само последното.
+    const mine = ++latest;
+    const found = await search(input.value.trim());
+    if (mine !== latest) return;
+    items = found;
+    if (!items.length) return close();
+    list.replaceChildren(...items.map((item, i) => {
+      const li = h('li', { role: 'option', id: `${list.id}-${i}`, 'aria-selected': 'false' }, render(item));
+      li.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        pick(item);
+      });
+      return li;
+    }));
+    list.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    active = -1;
+  };
+  input.addEventListener('input', update);
+  input.addEventListener('focus', () => { if (input.value.trim()) update(); });
+  input.addEventListener('blur', () => setTimeout(close, 120));
+  input.addEventListener('keydown', (event) => {
+    if (list.hidden) {
+      if (event.key === 'ArrowDown') update();
+      return;
+    }
+    if (event.key === 'ArrowDown') { event.preventDefault(); highlight(Math.min(active + 1, items.length - 1)); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); highlight(Math.max(active - 1, 0)); }
+    else if (event.key === 'Enter' && active >= 0) { event.preventDefault(); pick(items[active]); }
+    else if (event.key === 'Escape') close();
+  });
+  return list;
+}
+
+const placeLine = (p) => [p.municipality !== p.name ? `общ. ${p.municipality}` : '', `обл. ${p.region}`].filter(Boolean).join(', ');
+
+export function addressFields(values = {}, { legend = 'Адрес' } = {}) {
+  const option = (value, label = value) => h('option', { value }, label);
+  const region = h('select', { id: 'f-region', name: 'region' }, option('', 'Изберете област'), values.region && option(values.region));
+  const municipality = h('select', { id: 'f-municipality', name: 'municipality' }, option('', 'Изберете община'), values.municipality && option(values.municipality));
+  region.value = values.region || '';
+  municipality.value = values.municipality || '';
+  const city = h('input', { id: 'f-city', name: 'city', type: 'text', value: values.city, maxlength: 100, placeholder: 'Започнете да пишете, например Пловдив' });
+  const postal = h('input', { id: 'f-postalCode', name: 'postalCode', type: 'text', inputmode: 'numeric', maxlength: 4, value: values.postalCode, placeholder: '4 цифри' });
+  const street = h('input', { id: 'f-address', name: 'address', type: 'text', value: values.address, maxlength: 200, autocomplete: 'street-address', placeholder: 'Улица, номер, вход, етаж, апартамент' });
+  let data = null;
+
+  function fillMunicipalities(keep) {
+    const names = data && region.value ? data.municipalitiesOf(region.value) : [];
+    municipality.replaceChildren(option('', region.value ? 'Изберете община' : 'Първо изберете област'), ...names.map((n) => option(n)));
+    municipality.value = names.includes(keep) ? keep : '';
+  }
+  function choosePlace(place, code) {
+    city.value = place.name;
+    region.value = place.region;
+    fillMunicipalities(place.municipality);
+    postal.value = code || (place.codes.includes(postal.value) ? postal.value : place.codes[0]);
+    city.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  loadPlaces().then((loaded) => {
+    data = loaded;
+    if (!data) return; // без справочника полетата остават обикновени текстови полета
+    const current = region.value;
+    region.replaceChildren(option('', 'Изберете област'), ...data.regions.map((r) => option(r)));
+    region.value = data.regions.includes(current) ? current : '';
+    fillMunicipalities(values.municipality);
+  });
+  region.addEventListener('change', () => fillMunicipalities(municipality.value));
+
+  const cityList = combobox(city, {
+    search: async (q) => {
+      const loaded = data || await loadPlaces();
+      if (!loaded || q.length < 2) return [];
+      const key = lower(q);
+      // Търси се в цялата страна; местата в избраната община и област излизат първи.
+      const rank = (p) => (p.key.startsWith(key) ? 0 : 4)
+        + (municipality.value && p.municipality === municipality.value ? 0 : 1)
+        + (region.value && p.region === region.value ? 0 : 1);
+      return loaded.places
+        .filter((p) => p.key.includes(key))
+        .map((p, i) => ({ p, score: rank(p), i }))
+        .sort((a, b) => a.score - b.score || a.i - b.i)
+        .slice(0, 8)
+        .map(({ p }) => p);
+    },
+    render: (p) => [h('strong', {}, p.name), h('span', { class: 'combo__sub' }, `${placeLine(p)} · ПК ${p.codes[0]}`)],
+    onPick: (p) => choosePlace(p),
+  });
+  const postalList = combobox(postal, {
+    search: async (q) => {
+      const loaded = data || await loadPlaces();
+      if (!loaded || !/^\d{1,4}$/.test(q)) return [];
+      return loaded.places.filter((p) => p.codes.some((c) => c.startsWith(q))).slice(0, 8);
+    },
+    render: (p) => [h('strong', {}, `${p.codes.find((c) => c.startsWith(postal.value.trim())) || p.codes[0]} ${p.name}`), h('span', { class: 'combo__sub' }, placeLine(p))],
+    onPick: (p) => choosePlace(p, p.codes.find((c) => c.startsWith(postal.value.trim()))),
+  });
+  postal.addEventListener('input', () => { postal.value = postal.value.replace(/\D/g, '').slice(0, 4); });
+
+  const wrap = (id, label, control, extra, cls = '') => h('div', { class: `field ${cls}` },
+    h('label', { for: id }, label), h('div', { class: 'combo' }, control, extra));
+  return h('fieldset', { class: 'field full address' },
+    h('legend', {}, legend),
+    h('div', { class: 'form__grid' },
+      wrap('f-city', 'Населено място', city, cityList, 'full'),
+      wrap('f-region', 'Област', region),
+      wrap('f-municipality', 'Община', municipality),
+      wrap('f-postalCode', 'Пощенски код', postal, postalList),
+      wrap('f-address', 'Улица и номер', street, null, 'full')),
+    h('p', { class: 'small muted' }, 'Изберете населеното място от списъка: областта, общината и пощенският код се попълват сами.'));
+}
+
+// Качване на файл като суров поток; името се подава отделно, защото може да е на кирилица.
+export async function uploadFile(path, file) {
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': file.type || 'application/octet-stream', 'x-file-name': encodeURIComponent(file.name) },
+      body: file,
+    });
+  } catch {
+    throw new ApiError(0, 'Няма връзка със сървъра. Проверете интернета и опитайте отново.');
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new ApiError(res.status, data?.error?.message || 'Файлът не беше качен. Опитайте отново.');
+  return data;
+}
+
+export const formatSize = (bytes) => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`);
 
 // Полетата за самоличност, общи за регистрация, профил и редакция от оператор.
 export function identityFields(kind, c = {}) {

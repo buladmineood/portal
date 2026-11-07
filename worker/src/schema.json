@@ -23,7 +23,10 @@
       { "name": "contactPerson", "label": "Лице за контакт", "kind": "text" },
       { "name": "phone", "label": "Телефон", "kind": "text" },
       { "name": "contactEmail", "label": "Имейл за контакт", "kind": "text" },
-      { "name": "city", "label": "Град", "kind": "text" },
+      { "name": "region", "label": "Област", "kind": "text" },
+      { "name": "municipality", "label": "Община", "kind": "text" },
+      { "name": "city", "label": "Населено място", "kind": "text" },
+      { "name": "postalCode", "label": "Пощенски код", "kind": "text" },
       { "name": "address", "label": "Адрес", "kind": "text" },
       { "name": "consentAt", "label": "Съгласие на", "kind": "date" },
       { "name": "consentVersion", "label": "Версия на политиката", "kind": "text" }
@@ -84,6 +87,38 @@
       { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
       { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
       { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true }
+    ]
+  },
+  "documents": {
+    "title": "Портал - Изискани документи",
+    "titleLabel": "ID документ",
+    "columns": [
+      { "name": "createdAt", "label": "Изискан на", "kind": "date" },
+      { "name": "updatedAt", "label": "Обновен", "kind": "date" },
+      { "name": "requestId", "label": "Номер на заявка", "kind": "text", "indexed": true },
+      { "name": "clientId", "label": "ID клиент", "kind": "text", "indexed": true },
+      { "name": "docTitle", "label": "Документ", "kind": "text" },
+      { "name": "note", "label": "Указания", "kind": "multiline" },
+      { "name": "docStatus", "label": "Статус", "kind": "choice", "choices": ["Изискан", "Изпратен", "Нужна корекция", "Приет", "Отменен"], "indexed": true },
+      { "name": "round", "label": "Опит", "kind": "text" },
+      { "name": "reason", "label": "Причина за корекция", "kind": "multiline" },
+      { "name": "requestedBy", "label": "Изискал", "kind": "text" }
+    ]
+  },
+  "files": {
+    "title": "Портал - Файлове",
+    "titleLabel": "ID файл",
+    "columns": [
+      { "name": "uploadedAt", "label": "Качен на", "kind": "date" },
+      { "name": "docId", "label": "ID документ", "kind": "text", "indexed": true },
+      { "name": "requestId", "label": "Номер на заявка", "kind": "text", "indexed": true },
+      { "name": "clientId", "label": "ID клиент", "kind": "text", "indexed": true },
+      { "name": "fileName", "label": "Име на файла", "kind": "text" },
+      { "name": "mimeType", "label": "Вид", "kind": "text" },
+      { "name": "size", "label": "Размер (байта)", "kind": "text" },
+      { "name": "driveItemId", "label": "ID в библиотеката", "kind": "text" },
+      { "name": "round", "label": "Опит", "kind": "text" },
+      { "name": "fileStatus", "label": "Статус", "kind": "choice", "choices": ["Чернова", "Изпратен", "Заменен", "Изтрит"], "indexed": true }
     ]
   },
   "departments": {

@@ -3,6 +3,9 @@ import {
   b64url, hashPassword, randomCode, randomDigits, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
 } from './crypto.js';
 import { renderEmail } from './email.js';
+import {
+  ALLOWED_LABEL, cleanFileName, contentDisposition, detectFileType, MAX_FILE_BYTES, MAX_FILES_PER_DOCUMENT,
+} from './files.js';
 import { beginLogin, completeLogin, isProvider } from './oauth.js';
 import schema from './schema.json' with { type: 'json' };
 import {
@@ -1094,8 +1097,220 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function listOwnRequests(request) {
     const session = await requireSession(request);
     const client = await requireClient(session);
-    const rows = await store.find('requests', 'clientId', client.id);
-    return json({ requests: rows.sort(byNewest('createdAt')).map(publicRequest) });
+    const [rows, documents] = await Promise.all([
+      store.find('requests', 'clientId', client.id),
+      store.find('documents', 'clientId', client.id),
+    ]);
+    // Колко документа чакат клиента по всяка заявка.
+    const waiting = Object.create(null);
+    for (const d of documents) if (OPEN_DOC.includes(d.docStatus)) waiting[d.requestId] = (waiting[d.requestId] || 0) + 1;
+    return json({ requests: rows.sort(byNewest('createdAt')).map((r) => ({ ...publicRequest(r), documentsWaiting: waiting[r.id] || 0 })) });
+  }
+
+  // --- Документи по заявка ---
+
+  // Клиентът качва само в документ, който е изискан или върнат за корекция. След изпращане е заключен.
+  const OPEN_DOC = ['Изискан', 'Нужна корекция'];
+  const publicFile = (f) => ({
+    id: f.id, docId: f.docId, fileName: f.fileName, mimeType: f.mimeType, size: Number(f.size || 0),
+    uploadedAt: f.uploadedAt, round: Number(f.round || 1), fileStatus: f.fileStatus,
+  });
+  const publicDocument = (d) => ({
+    id: d.id, docTitle: d.docTitle, note: d.note, docStatus: d.docStatus, round: Number(d.round || 1),
+    reason: d.reason, createdAt: d.createdAt, updatedAt: d.updatedAt,
+  });
+
+  async function documentsFor(requestId) {
+    const [documents, files] = await Promise.all([
+      store.find('documents', 'requestId', requestId),
+      store.find('files', 'requestId', requestId),
+    ]);
+    return {
+      documents: documents.filter((d) => d.docStatus !== 'Отменен').sort(byOldest('createdAt')).map(publicDocument),
+      files: files.filter((f) => f.fileStatus !== 'Изтрит').sort(byOldest('uploadedAt')).map(publicFile),
+    };
+  }
+
+  async function requestDocuments(request, id) {
+    const operator = requireOperator(await requireSession(request));
+    const [record] = await store.find('requests', 'id', id);
+    if (!record) throw new HttpError(404, 'Заявката не е намерена.');
+    const body = await readBody(request);
+    const items = (Array.isArray(body.items) ? body.items : [])
+      .map((item) => ({ docTitle: clean(item?.docTitle, 150), note: clean(item?.note, 1000, { multiline: true }) }))
+      .filter((item) => item.docTitle);
+    if (!items.length) throw new HttpError(422, 'Добавете поне един документ.', { docTitle: 'Напишете кой документ е нужен.' });
+    if (items.length > 20) throw new HttpError(422, 'Може да изискате до 20 документа наведнъж.');
+    const at = nowIso();
+    const actorName = operator.fullName || operator.id;
+    for (const item of items) {
+      await store.create('documents', {
+        id: `DOC-${crypto.randomUUID()}`, createdAt: at, updatedAt: at, requestId: id, clientId: record.clientId,
+        ...item, docStatus: 'Изискан', round: '1', requestedBy: actorName,
+      });
+    }
+    await addEvent({
+      requestId: id, actorType: 'Оператор', actorName, visibility: 'Клиент',
+      action: `Изискани документи: ${items.map((i) => i.docTitle).join(', ')}`,
+    });
+    await store.update('requests', id, { updatedAt: at });
+    await notifyClient(record.clientId, `Заявка ${id}: изискани са документи`, {
+      title: 'Нужни са документи',
+      paragraphs: ['За да продължим работата по заявката Ви, качете следните документи в портала:'],
+      status: record.requestStatus,
+      details: items.map((item, i) => [`Документ ${i + 1}`, item.docTitle]),
+      action: { label: 'Качете документите', url: requestUrl(id) },
+      note: `Приемаме ${ALLOWED_LABEL}, до 10 MB на файл. Не изпращайте документи по имейл.`,
+    });
+    return json(await documentsFor(id), 201);
+  }
+
+  async function reviewDocument(request, docId) {
+    const operator = requireOperator(await requireSession(request));
+    const body = await readBody(request);
+    const [doc] = await store.find('documents', 'id', docId);
+    if (!doc) throw new HttpError(404, 'Документът не е намерен.');
+    const reason = clean(body.reason, 1000, { multiline: true });
+    const actor = { actorType: 'Оператор', actorName: operator.fullName || operator.id };
+    let patch;
+    let action;
+    if (body.decision === 'accept') {
+      if (doc.docStatus !== 'Изпратен') throw new HttpError(409, 'Може да приемете само изпратен документ.');
+      patch = { docStatus: 'Приет' };
+      action = `Приет документ: ${doc.docTitle}`;
+    } else if (body.decision === 'correction') {
+      if (!['Изпратен', 'Приет'].includes(doc.docStatus)) throw new HttpError(409, 'Може да върнете за корекция само изпратен документ.');
+      if (!reason) throw new HttpError(422, 'Опишете какво трябва да се поправи.', { reason: 'Опишете какво трябва да се поправи.' });
+      // Нов опит: клиентът качва нови файлове, а старите остават за история.
+      patch = { docStatus: 'Нужна корекция', reason, round: String(Number(doc.round || 1) + 1) };
+      action = `Нужна корекция: ${doc.docTitle}`;
+    } else if (body.decision === 'cancel') {
+      if (!OPEN_DOC.includes(doc.docStatus)) throw new HttpError(409, 'Може да отмените само документ, който още не е изпратен.');
+      patch = { docStatus: 'Отменен' };
+      action = `Отменен документ: ${doc.docTitle}`;
+    } else {
+      throw new HttpError(422, 'Невалидно решение.');
+    }
+    patch.updatedAt = nowIso();
+    await store.update('documents', docId, patch);
+    await addEvent({ ...actor, requestId: doc.requestId, action, message: patch.reason || '', visibility: 'Клиент' });
+    if (body.decision === 'correction') {
+      const [record] = await store.find('requests', 'id', doc.requestId);
+      await notifyClient(doc.clientId, `Заявка ${doc.requestId}: нужна е корекция на документ`, {
+        title: 'Нужна е корекция на документ',
+        paragraphs: ['Прегледахме документа, но се нуждаем от поправен или по-ясен вариант.'],
+        status: record?.requestStatus,
+        details: [['Документ', doc.docTitle], ['Какво да се поправи', reason]],
+        action: { label: 'Качете нов вариант', url: requestUrl(doc.requestId) },
+      });
+    }
+    return json(await documentsFor(doc.requestId));
+  }
+
+  async function ownOpenDocument(session, requestId, docId) {
+    const { client, record } = await ownRequest(session, requestId);
+    const [doc] = await store.find('documents', 'id', docId);
+    if (!doc || doc.requestId !== record.id) throw new HttpError(404, 'Документът не е намерен.');
+    if (!OPEN_DOC.includes(doc.docStatus)) {
+      throw new HttpError(409, 'Документът вече е изпратен. Може да качвате отново само ако операторът поиска корекция.');
+    }
+    return { client, record, doc };
+  }
+
+  async function uploadDocumentFile(request, requestId, docId) {
+    const session = await requireSession(request);
+    const { client, doc } = await ownOpenDocument(session, requestId, docId);
+    const declared = Number(request.headers.get('content-length') || 0);
+    if (declared > MAX_FILE_BYTES) throw new HttpError(413, 'Файлът е над 10 MB.');
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    if (!bytes.length) throw new HttpError(422, 'Файлът е празен.');
+    if (bytes.length > MAX_FILE_BYTES) throw new HttpError(413, 'Файлът е над 10 MB.');
+    const type = detectFileType(bytes, request.headers.get('x-file-name') || '');
+    if (!type) throw new HttpError(415, `Този вид файл не се приема. Качете ${ALLOWED_LABEL}.`);
+    const round = String(doc.round || '1');
+    const existing = (await store.find('files', 'docId', docId)).filter((f) => f.round === round && f.fileStatus === 'Чернова');
+    if (existing.length >= MAX_FILES_PER_DOCUMENT) throw new HttpError(422, `Може да качите до ${MAX_FILES_PER_DOCUMENT} файла за един документ.`);
+
+    const id = `F-${crypto.randomUUID()}`;
+    const driveItemId = await store.uploadFile(`Портал/Документи/${requestId}/${id}.${type.ext}`, bytes);
+    const record = {
+      id, uploadedAt: nowIso(), docId, requestId, clientId: client.id,
+      fileName: cleanFileName(request.headers.get('x-file-name'), type.ext),
+      mimeType: type.mime, size: String(bytes.length), driveItemId, round, fileStatus: 'Чернова',
+    };
+    await store.create('files', record);
+    return json({ file: publicFile(record) }, 201);
+  }
+
+  async function deleteDraftFile(request, requestId, fileId) {
+    const session = await requireSession(request);
+    const { record } = await ownRequest(session, requestId);
+    const [file] = await store.find('files', 'id', fileId);
+    if (!file || file.requestId !== record.id) throw new HttpError(404, 'Файлът не е намерен.');
+    if (file.fileStatus !== 'Чернова') throw new HttpError(409, 'Изпратените файлове не могат да се изтриват.');
+    await ownOpenDocument(session, requestId, file.docId);
+    await store.deleteFile(file.driveItemId);
+    await store.update('files', fileId, { fileStatus: 'Изтрит', driveItemId: '' });
+    return json({ ok: true });
+  }
+
+  // Изпраща всички отворени документи наведнъж; след това те се заключват.
+  async function submitDocuments(request, requestId) {
+    const session = await requireSession(request);
+    const { client, record } = await ownRequest(session, requestId);
+    const [documents, files] = await Promise.all([
+      store.find('documents', 'requestId', requestId),
+      store.find('files', 'requestId', requestId),
+    ]);
+    const open = documents.filter((d) => OPEN_DOC.includes(d.docStatus));
+    if (!open.length) throw new HttpError(409, 'Няма документи за изпращане.');
+    const missing = open.filter((d) => !files.some((f) => f.docId === d.id && f.fileStatus === 'Чернова' && f.round === String(d.round || '1')));
+    if (missing.length) {
+      throw new HttpError(422, `Качете файл за: ${missing.map((d) => d.docTitle).join(', ')}.`);
+    }
+    const at = nowIso();
+    for (const doc of open) {
+      const round = String(doc.round || '1');
+      for (const file of files.filter((f) => f.docId === doc.id)) {
+        if (file.fileStatus === 'Чернова' && file.round === round) await store.update('files', file.id, { fileStatus: 'Изпратен' });
+        else if (file.fileStatus === 'Изпратен') await store.update('files', file.id, { fileStatus: 'Заменен' });
+      }
+      await store.update('documents', doc.id, { docStatus: 'Изпратен', updatedAt: at });
+    }
+    await addEvent({
+      requestId, actorType: 'Клиент', actorName: displayName(client), visibility: 'Клиент',
+      action: `Изпратени документи: ${open.map((d) => d.docTitle).join(', ')}`,
+    });
+    await store.update('requests', requestId, { updatedAt: at });
+    if (record.assignedTo) {
+      await sendMail(env.MAIL_NOREPLY, record.assignedTo, `Заявка ${requestId}: клиентът изпрати документи`, {
+        title: 'Клиентът изпрати документи',
+        paragraphs: ['Документите чакат преглед в портала.'],
+        details: [['Номер', requestId], ['Клиент', record.clientName], ['Документи', open.map((d) => d.docTitle).join(', ')]],
+        action: { label: 'Прегледайте документите', url: `${env.PORTAL_ORIGIN}/admin.html#/r/${requestId}` },
+      });
+    }
+    return json(await documentsFor(requestId));
+  }
+
+  // Изтегляне само през портала: проверка на правата, без вграждане в страницата и без изпълнение.
+  async function downloadFile(request, fileId, asOperator) {
+    const session = await requireSession(request);
+    const [file] = await store.find('files', 'id', fileId);
+    if (!file || !file.driveItemId) throw new HttpError(404, 'Файлът не е намерен.');
+    if (asOperator) requireOperator(session);
+    else await ownRequest(session, file.requestId);
+    const body = await store.downloadFile(file.driveItemId);
+    return new Response(body, {
+      headers: {
+        'content-type': file.mimeType,
+        'content-disposition': contentDisposition(file.fileName),
+        'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; sandbox",
+        'x-robots-tag': 'noindex, nofollow',
+      },
+    });
   }
 
   async function createRequest(request) {
@@ -1180,10 +1395,11 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function getOwnRequest(request, id) {
     const session = await requireSession(request);
     const { record } = await ownRequest(session, id);
-    const events = await store.find('events', 'requestId', id);
+    const [events, docs] = await Promise.all([store.find('events', 'requestId', id), documentsFor(id)]);
     return json({
       request: publicRequest(record),
       events: events.filter((e) => e.visibility === 'Клиент').sort(byOldest('occurredAt')).map(publicEvent),
+      ...docs,
     });
   }
 
@@ -1213,17 +1429,19 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function adminOverview(request) {
     const viewer = requireOperator(await requireSession(request));
     const isAdmin = viewer.role === ADMIN_ROLE;
-    const [requests, clients, operators, changes, departments, privacy] = await Promise.all([
+    const [requests, clients, operators, changes, toReview, departments, privacy] = await Promise.all([
       store.list('requests'),
       store.list('clients'),
       store.list('operators'),
       store.find('changes', 'changeStatus', 'Чака'),
+      store.find('documents', 'docStatus', 'Изпратен'),
       store.list('departments'),
       isAdmin ? store.list('privacy') : [],
     ]);
     const clientById = new Map(clients.map((c) => [c.id, c]));
     return json({
       changes: changes.sort(byOldest('createdAt')).map((c) => changeView(c, clientById.get(c.clientId))),
+      documentsToReview: toReview.sort(byOldest('updatedAt')).map((d) => ({ id: d.id, requestId: d.requestId, docTitle: d.docTitle, updatedAt: d.updatedAt })),
       privacy: isAdmin ? privacy.sort(byOldest('dueAt')) : undefined,
       requests: requests.sort(byNewest('createdAt')),
       clients: clients.sort(byNewest('createdAt')).map(publicClient),
@@ -1237,14 +1455,16 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     await requireOperator(await requireSession(request));
     const [record] = await store.find('requests', 'id', id);
     if (!record) throw new HttpError(404, 'Заявката не е намерена.');
-    const [[client], events] = await Promise.all([
+    const [[client], events, docs] = await Promise.all([
       store.find('clients', 'id', record.clientId),
       store.find('events', 'requestId', id),
+      documentsFor(id),
     ]);
     return json({
       request: record,
       client: client ? publicClient(client) : null,
       events: events.sort(byOldest('occurredAt')),
+      ...docs,
     });
   }
 
@@ -1363,6 +1583,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       });
     }
     if (method === 'GET' && path === '/api/profile/changes') return listOwnChanges(request);
+    if (method === 'POST' && (m = path.match(/^\/api\/requests\/([\w-]{1,40})\/documents\/([\w-]{1,60})\/files$/))) return uploadDocumentFile(request, m[1], m[2]);
+    if (method === 'DELETE' && (m = path.match(/^\/api\/requests\/([\w-]{1,40})\/files\/([\w-]{1,60})$/))) return deleteDraftFile(request, m[1], m[2]);
+    if (method === 'POST' && (m = path.match(/^\/api\/requests\/([\w-]{1,40})\/documents\/submit$/))) return submitDocuments(request, m[1]);
+    if (method === 'GET' && (m = path.match(/^\/api\/files\/([\w-]{1,60})$/))) return downloadFile(request, m[1], false);
+    if (method === 'GET' && (m = path.match(/^\/api\/admin\/files\/([\w-]{1,60})$/))) return downloadFile(request, m[1], true);
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/requests\/([\w-]{1,40})\/documents$/))) return requestDocuments(request, m[1]);
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/documents\/([\w-]{1,60})\/review$/))) return reviewDocument(request, m[1]);
     if (path === '/api/privacy-requests') {
       if (method === 'GET') return listOwnPrivacy(request);
       if (method === 'POST') return createPrivacy(request);

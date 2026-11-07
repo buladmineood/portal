@@ -1,3 +1,4 @@
+import PLACES from '../../assets/data/places.json' with { type: 'json' };
 import { PERSON_TYPES } from './catalog.js';
 
 export function clean(value, max, { multiline = false } = {}) {
@@ -59,18 +60,33 @@ const PHONE =/^\+?[0-9][0-9 ()\/-]{5,19}$/;
 const PERSON_NAME = /^[\p{L}][\p{L}\p{M}' .-]*$/u;
 
 // Връща { fields, errors }. Приемат се само изброените полета, а полетата от другия вид лице се изчистват.
+// Области и общини от същия справочник, който ползва формата за търсене (GeoNames, CC BY 4.0).
+const REGION_MUNICIPALITIES = new Map(PLACES.regions.map((region) => [region, new Set()]));
+for (const [municipality, regionIndex] of PLACES.municipalities) {
+  REGION_MUNICIPALITIES.get(PLACES.regions[regionIndex]).add(municipality);
+}
+
 export function validateContact(body) {
   const fields = {
     phone: clean(body.phone, 30),
     contactEmail: clean(body.contactEmail, 200).toLowerCase(),
+    region: clean(body.region, 60),
+    municipality: clean(body.municipality, 80),
     city: clean(body.city, 100),
+    postalCode: clean(body.postalCode, 4),
     address: clean(body.address, 200),
   };
   const errors = {};
   if (!PHONE.test(fields.phone)) errors.phone = 'Въведете валиден телефон, например +359 888 123 456.';
   if (!EMAIL.test(fields.contactEmail)) errors.contactEmail = 'Въведете валиден имейл.';
-  if (!fields.city) errors.city = 'Въведете град.';
-  if (fields.address.length < 5) errors.address = 'Въведете пълен адрес.';
+  // Областта и общината са по избор (например за адрес в чужбина), но ако са попълнени, трябва да си съответстват.
+  if (fields.region && !REGION_MUNICIPALITIES.has(fields.region)) errors.region = 'Изберете област от списъка.';
+  else if (fields.municipality && fields.region && !REGION_MUNICIPALITIES.get(fields.region).has(fields.municipality)) {
+    errors.municipality = 'Общината не е в избраната област.';
+  }
+  if (!fields.city) errors.city = 'Въведете населено място.';
+  if (fields.postalCode && !/^\d{4}$/.test(fields.postalCode)) errors.postalCode = 'Пощенският код е 4 цифри.';
+  if (fields.address.length < 3) errors.address = 'Въведете улица и номер или квартал и блок.';
   return { fields, errors };
 }
 

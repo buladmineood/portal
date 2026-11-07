@@ -1,5 +1,6 @@
 import {
-  api, canRefreshNow, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatTime, formDialog, formValues, h, icon, identityFields, linkBox,
+  api, canRefreshNow, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatSize, formatTime, formDialog, formValues, h, icon,
+  identityFields, linkBox,
   loginLabel, markClean, markDirty, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill,
   timeAgo, toast,
 } from './core.js';
@@ -19,7 +20,7 @@ const PRIVACY_CLOSED = ['Изпълнено', 'Отказано'];
 const ACTIVE_STATUSES = ['Нова', 'Уточняване', 'Подготвена', 'Подадена', 'Проследява се'];
 const FLOW = ['Нова', 'Уточняване', 'Подготвена', 'Подадена', 'Проследява се', 'Получена'];
 const DUE_SOON_DAYS = 7;
-const filters = { status: '', category: '', owner: '', department: '', q: '', page: 1, sort: 'createdAt', dir: -1 };
+const filters = { status: '', category: '', owner: '', department: '', docs: false, q: '', page: 1, sort: 'createdAt', dir: -1 };
 
 const isAdmin = () => me.operator.role === 'Администратор';
 const departmentName = (id) => data?.departments?.find((d) => d.id === id)?.name || '';
@@ -111,6 +112,7 @@ function viewDashboard() {
       kpi('user', 'Възложени на мен', mine.length, '#/requests?owner=me'),
       myDepartment && kpi('building', 'Активни в моя отдел', departmentActive.length, '#/requests?dept=mine'),
       kpi('check', 'Чакат одобрение', data.changes.length, '#/changes', data.changes.length ? 'kpi--warn' : ''),
+      kpi('doc', 'Документи за преглед', (data.documentsToReview || []).length, '#/requests?docs=1', (data.documentsToReview || []).length ? 'kpi--accent' : ''),
       data.privacy && kpi('shield', 'Искания за лични данни', privacy.length, '#/privacy', overdue.length ? 'kpi--danger' : dueSoon.length ? 'kpi--warn' : '')),
     h('div', { class: 'grid-2' },
       panel('Нови заявки', '#/requests?status=Нова', fresh, 'Няма нови заявки.'),
@@ -126,6 +128,7 @@ function matches(r) {
   if (filters.department === 'mine' && r.department !== me.operator.department) return false;
   if (filters.department === 'none' && r.department) return false;
   if (filters.department && !['mine', 'none'].includes(filters.department) && r.department !== filters.department) return false;
+  if (filters.docs && !(data.documentsToReview || []).some((d) => d.requestId === r.id)) return false;
   if (filters.owner === 'none' && r.assignedTo) return false;
   if (filters.owner === 'me' && r.assignedTo !== me.operator.email) return false;
   if (filters.owner && !['none', 'me'].includes(filters.owner) && r.assignedTo !== filters.owner) return false;
@@ -143,6 +146,7 @@ function viewRequests(query) {
     filters.status = query.get('status') || '';
     filters.owner = query.get('owner') || '';
     filters.department = query.get('dept') || '';
+    filters.docs = query.get('docs') === '1';
     filters.category = '';
     filters.q = '';
     filters.page = 1;
@@ -204,7 +208,8 @@ function viewRequests(query) {
         },
           h('td', {}, h('a', { href: `#/r/${r.id}` }, r.id)),
           h('td', { 'data-label': 'Клиент' }, r.clientName, h('div', { class: 'small muted' }, r.personType)),
-          h('td', { 'data-label': 'Услуга' }, r.service, h('div', { class: 'small muted' }, r.serviceCategory)),
+          h('td', { 'data-label': 'Услуга' }, r.service, h('div', { class: 'small muted' }, r.serviceCategory),
+            (data.documentsToReview || []).some((d) => d.requestId === r.id) && h('span', { class: 'req-card__alert' }, icon('doc', 14), 'Документи за преглед')),
           h('td', {}, statusPill(r.requestStatus)),
           h('td', { 'data-label': 'Отговорен' }, r.assignedTo ? operatorName(r.assignedTo) : h('span', { class: 'muted' }, 'няма'),
             r.department && h('div', { class: 'small muted' }, departmentName(r.department))),
@@ -286,6 +291,104 @@ function clientCard(c) {
     h('dt', {}, 'Имейл'), h('dd', { class: 'row-tight' }, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail), copyButton(c.contactEmail, 'Копирайте имейла')),
     h('dt', {}, 'Адрес'), h('dd', {}, `${c.city}, ${c.address}`),
     company && c.correspondenceAddress && [h('dt', {}, 'За кореспонденция'), h('dd', {}, c.correspondenceAddress)]);
+}
+
+// --- Документи по заявката ---
+
+const COMMON_DOCUMENTS = ['Лична карта', 'Нотариален акт', 'Скица', 'Удостоверение за наследници', 'Пълномощно', 'Талон на МПС', 'Удостоверение за актуално състояние'];
+
+async function askForDocuments(requestId) {
+  const rows = h('div', { class: 'stack-tight' });
+  const addRow = (title = '') => {
+    const row = h('div', { class: 'doc-ask' },
+      h('input', { type: 'text', name: 'docTitle', maxlength: 150, value: title, placeholder: 'Документ, например Нотариален акт', 'aria-label': 'Документ' }),
+      h('input', { type: 'text', name: 'note', maxlength: 1000, placeholder: 'Указания (по желание)', 'aria-label': 'Указания' }),
+      h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Премахнете реда', onclick: () => row.remove() }, icon('close', 16)));
+    rows.append(row);
+    row.querySelector('input').focus();
+  };
+  addRow();
+  const saved = await formDialog({
+    title: 'Поискайте документи',
+    submitLabel: 'Поискайте',
+    fields: [
+      h('p', { class: 'small muted' }, 'Клиентът получава имейл и качва файловете в портала. Документите се заключват след изпращане.'),
+      h('div', { class: 'tags' }, COMMON_DOCUMENTS.map((title) => h('button', { class: 'tag tag--button', type: 'button', onclick: () => addRow(title) }, `+ ${title}`))),
+      rows,
+      h('button', { class: 'link-btn small', type: 'button', onclick: () => addRow() }, '+ Добавете още един документ'),
+    ],
+    onSubmit: (values, form) => {
+      const items = [...form.querySelectorAll('.doc-ask')].map((row) => ({
+        docTitle: row.querySelector('[name=docTitle]').value.trim(),
+        note: row.querySelector('[name=note]').value.trim(),
+      })).filter((item) => item.docTitle);
+      return api(`/admin/requests/${encodeURIComponent(requestId)}/documents`, { method: 'POST', body: { items } });
+    },
+  });
+  return !!saved;
+}
+
+function operatorDocuments(requestId, documents, files) {
+  const reload = async () => {
+    const y = window.scrollY;
+    await refresh();
+    await viewRequest(requestId);
+    window.scrollTo(0, y);
+  };
+  const review = (doc, decision) => async () => {
+    let reason = '';
+    if (decision === 'correction') {
+      const result = await formDialog({
+        title: `Корекция: ${doc.docTitle}`,
+        submitLabel: 'Поискайте корекция',
+        fields: [h('div', { class: 'field' }, h('label', { for: 'f-reason' }, 'Какво трябва да поправи клиентът?'),
+          h('textarea', { id: 'f-reason', name: 'reason', maxlength: 1000, placeholder: 'Например: снимката е неясна, качете и двете страни.' }))],
+      });
+      if (!result) return;
+      reason = result.reason;
+    }
+    if (decision === 'cancel' && !(await confirmDialog({ title: 'Отказ от документа', text: `Клиентът вече няма да трябва да качва „${doc.docTitle}“.`, confirmLabel: 'Откажете', danger: true }))) return;
+    try {
+      await api(`/admin/documents/${encodeURIComponent(doc.id)}/review`, { method: 'POST', body: { decision, reason } });
+      toast({ accept: 'Документът е приет.', correction: 'Клиентът ще получи имейл за корекцията.', cancel: 'Документът е отменен.' }[decision]);
+      await reload();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+  const fileLink = (f) => h('li', { class: 'file-row' }, icon('doc', 18),
+    h('span', { class: 'file-row__name' },
+      h('a', { href: `/api/admin/files/${f.id}`, download: f.fileName }, f.fileName),
+      h('span', { class: 'small muted' }, ` · ${formatSize(f.size)} · ${timeAgo(f.uploadedAt)}${f.fileStatus === 'Чернова' ? ' · още не е изпратен' : ''}`)));
+
+  const ask = h('button', {
+    class: 'btn btn--ghost btn--small', type: 'button',
+    onclick: async () => {
+      if (await askForDocuments(requestId)) {
+        toast('Клиентът ще получи имейл с поисканите документи.');
+        await reload();
+      }
+    },
+  }, icon('plus', 16), 'Поискайте документи');
+
+  return h('section', { class: 'card stack', 'aria-labelledby': 'docs-title' },
+    h('div', { class: 'card__head card__head--plain' }, h('h2', { id: 'docs-title' }, 'Документи'), ask),
+    documents.length
+      ? h('ol', { class: 'doc-list' }, documents.map((doc) => {
+        const current = files.filter((f) => f.docId === doc.id && f.fileStatus !== 'Заменен');
+        const older = files.filter((f) => f.docId === doc.id && f.fileStatus === 'Заменен');
+        return h('li', { class: 'doc' },
+          h('div', { class: 'doc__head' }, h('strong', {}, doc.docTitle), h('span', { class: 'pill', 'data-doc': doc.docStatus }, doc.docStatus)),
+          doc.note && h('p', { class: 'small muted' }, doc.note),
+          doc.docStatus === 'Нужна корекция' && h('p', { class: 'small' }, h('strong', {}, 'Поискана корекция: '), doc.reason),
+          current.length ? h('ul', { class: 'file-list' }, current.map(fileLink)) : h('p', { class: 'small muted' }, 'Още няма качени файлове.'),
+          older.length > 0 && h('details', { class: 'small' }, h('summary', {}, `Предишни версии (${older.length})`), h('ul', { class: 'file-list' }, older.map(fileLink))),
+          h('div', { class: 'row' },
+            doc.docStatus === 'Изпратен' && h('button', { class: 'btn btn--small', type: 'button', onclick: review(doc, 'accept') }, icon('check', 16), 'Приемете'),
+            ['Изпратен', 'Приет'].includes(doc.docStatus) && h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: review(doc, 'correction') }, 'Поискайте корекция'),
+            ['Изискан', 'Нужна корекция'].includes(doc.docStatus) && h('button', { class: 'link-btn small', type: 'button', onclick: review(doc, 'cancel') }, 'Отменете')));
+      }))
+      : h('p', { class: 'small muted' }, 'Не са изисквани документи по тази заявка.'));
 }
 
 async function viewRequest(id) {
@@ -377,6 +480,7 @@ async function viewRequest(id) {
           progress(r.requestStatus),
           h('h2', { class: 'card__title' }, 'Описание от клиента'),
           h('p', { class: 'pre' }, r.details)),
+        operatorDocuments(id, detail.documents || [], detail.files || []),
         h('section', { class: 'stack', 'aria-labelledby': 'history-title' },
           h('h2', { id: 'history-title' }, 'История'),
           h('ol', { class: 'timeline' }, detail.events.map((e) =>

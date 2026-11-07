@@ -55,7 +55,9 @@ export class GraphStore {
         await new Promise((resolve) => setTimeout(resolve, wait * 1000));
         continue;
       }
-      throw new Error(`Graph ${init.method || 'GET'} failed: ${res.status}`);
+      // Кодът на грешката от Graph помага при диагностика и не съдържа лични данни.
+      const code = await res.json().then((b) => b?.error?.code || '').catch(() => '');
+      throw new Error(`Graph ${init.method || 'GET'} failed: ${res.status} ${code}`.trim());
     }
   }
 
@@ -108,6 +110,49 @@ export class GraphStore {
     return record;
   }
 
+  // --- Файлове в библиотеката „Документи“ на сайта ---
+
+  // Адресът на сайта с „:“ не може да се комбинира с път на файл с „:“, затова се взима ID на библиотеката.
+  async driveUrl() {
+    if (!this.driveId) {
+      const drive = await this.request(`${GRAPH}/sites/${this.env.SP_HOSTNAME}:${this.env.SP_SITE_PATH}:/drive?$select=id`);
+      this.driveId = drive.id;
+    }
+    return `${GRAPH}/drives/${this.driveId}`;
+  }
+
+  // Качване със сесия: работи и за файлове над 4 MB. Адресът за качване е с вграден достъп, без токен.
+  async uploadFile(path, bytes) {
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    const session = await this.request(`${await this.driveUrl()}/root:/${encoded}:/createUploadSession`, {
+      method: 'POST',
+      body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'fail' } }),
+    });
+    const res = await this.fetch(session.uploadUrl, {
+      method: 'PUT',
+      headers: { 'content-range': `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}` },
+      body: bytes,
+    });
+    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+    return (await res.json()).id;
+  }
+
+  async downloadFile(itemId) {
+    const res = await this.fetch(`${await this.driveUrl()}/items/${encodeURIComponent(itemId)}/content`, {
+      headers: { authorization: `Bearer ${await this.accessToken()}` },
+    });
+    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    return res.body;
+  }
+
+  async deleteFile(itemId) {
+    const res = await this.fetch(`${await this.driveUrl()}/items/${encodeURIComponent(itemId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${await this.accessToken()}` },
+    });
+    if (!res.ok && res.status !== 404) throw new Error(`Delete failed: ${res.status}`);
+  }
+
   sendMail(from, to, subject, { html }) {
     return this.request(`${GRAPH}/users/${encodeURIComponent(from)}/sendMail`, {
       method: 'POST',
@@ -135,9 +180,21 @@ export class GraphStore {
 // За тестове и локална разработка; не се използва в production.
 export class MemoryStore {
   constructor(seed = {}) {
-    this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], changes: [], privacy: [], departments: [], ...seed };
+    this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], changes: [], privacy: [], departments: [], documents: [], files: [], ...seed };
     this.sentMail = [];
+    this.blobs = new Map();
   }
+  async uploadFile(path, bytes) {
+    const id = `item-${this.blobs.size + 1}`;
+    this.blobs.set(id, { path, bytes: new Uint8Array(bytes) });
+    return id;
+  }
+  async downloadFile(itemId) {
+    const blob = this.blobs.get(itemId);
+    if (!blob) throw new Error('missing');
+    return new Response(blob.bytes).body;
+  }
+  async deleteFile(itemId) { this.blobs.delete(itemId); }
   async sendMail(from, to, subject, { html, text }) { this.sentMail.push({ from, to, subject, text, html }); }
   async list(table) { return this.tables[table].map((r) => ({ ...r })); }
   async find(table, field, value) { return (await this.list(table)).filter((r) => r[field] === value); }

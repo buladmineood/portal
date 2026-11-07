@@ -29,12 +29,12 @@ const seedClient = {
   id: 'C-demo-1', createdAt: at(9), updatedAt: at(9), identity: 'google:client', provider: 'google',
   loginEmail: 'maria@example.com', personType: 'Физическо лице', firstName: 'Мария', middleName: '', lastName: 'Петрова', egn: '7501020018',
   companyName: '', eik: '', vatNumber: '', representative: '', phone: '+359 888 123 456', contactEmail: 'maria@example.com',
-  city: 'София', address: 'ул. Примерна 1', consentAt: at(9), consentVersion: '2026-11-07',
+  region: 'София (столица)', municipality: 'Столична', city: 'София', postalCode: '1000', address: 'ул. Примерна 1', consentAt: at(9), consentVersion: '2026-11-07',
 };
 const seedCompany = {
   ...seedClient, id: 'C-demo-2', identity: 'google:company', loginEmail: 'office@example.com', personType: 'Юридическо лице',
   firstName: '', lastName: '', egn: '', companyName: 'Пример ЕООД', eik: '123456786', vatNumber: 'BG123456786',
-  representative: 'Иван Иванов', contactEmail: 'office@example.com', city: 'Варна', address: 'бул. Примерен 2',
+  representative: 'Иван Иванов', contactEmail: 'office@example.com', region: 'Варна', municipality: 'Варна', city: 'Варна', postalCode: '9000', address: 'бул. Примерен 2',
 };
 const DEMO_DEPARTMENTS = { 'Имоти': 'D-DEMO1', 'Наследства': 'D-DEMO1', 'Регистрации и разрешения': 'D-DEMO2', 'Обслужване на фирми': 'D-DEMO2' };
 const req = (id, client, serviceCategory, service, details, requestStatus, assignedTo, days) => ({
@@ -80,7 +80,7 @@ const devUsers = {
 const destinations = { client: '/account.html', fresh: '/register.html', operator: '/admin.html' };
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webp': 'image/webp',
-  '.png': 'image/png', '.woff2': 'font/woff2', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.woff2': 'font/woff2', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain',
 };
 
 createServer(async (req_, res) => {
