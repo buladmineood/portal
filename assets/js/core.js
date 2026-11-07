@@ -120,6 +120,33 @@ export function contactFields(values = {}) {
   ];
 }
 
+// Полетата за самоличност, общи за регистрация, профил и редакция от оператор.
+export function identityFields(kind, c = {}) {
+  const identityHint = (masked) => (masked ? 'празно: без промяна' : 'за някои услуги е задължително');
+  if (kind === 'company') {
+    return h('div', { class: 'form__grid', 'data-kind': 'company' },
+      field({ name: 'companyName', label: 'Наименование на фирмата', value: c.companyName, autocomplete: 'organization', maxlength: 200, wrapClass: 'full' }),
+      field({ name: 'eik', label: 'ЕИК/БУЛСТАТ', value: c.eik, inputmode: 'numeric', maxlength: 13, placeholder: '9 или 13 цифри' }),
+      field({ name: 'vatNumber', label: 'ДДС номер', hint: 'ако има', value: c.vatNumber, maxlength: 12, placeholder: 'BG123456789' }),
+      field({ name: 'representative', label: 'Представляващ', value: c.representative, maxlength: 160 }),
+      field({ name: 'representativeRole', label: 'Длъжност', hint: 'например управител', value: c.representativeRole, maxlength: 100 }),
+      field({
+        name: 'representativeEgn', label: 'ЕГН или ЛНЧ на представляващия', hint: identityHint(c.representativeEgnMasked),
+        inputmode: 'numeric', autocomplete: 'off', maxlength: 10, placeholder: c.representativeEgnMasked || '10 цифри', wrapClass: 'full',
+      }),
+      field({ name: 'correspondenceAddress', label: 'Адрес за кореспонденция', hint: 'ако е различен', value: c.correspondenceAddress, maxlength: 200, wrapClass: 'full' }),
+      field({ name: 'contactPerson', label: 'Лице за контакт', hint: 'ако е различно', value: c.contactPerson, maxlength: 160, wrapClass: 'full' }));
+  }
+  return h('div', { class: 'form__grid', 'data-kind': 'individual' },
+    field({ name: 'firstName', label: 'Име', value: c.firstName, autocomplete: 'given-name', maxlength: 80 }),
+    field({ name: 'middleName', label: 'Презиме', hint: 'по желание', value: c.middleName, autocomplete: 'additional-name', maxlength: 80 }),
+    field({ name: 'lastName', label: 'Фамилия', value: c.lastName, autocomplete: 'family-name', maxlength: 80 }),
+    field({
+      name: 'egn', label: 'ЕГН или ЛНЧ', hint: identityHint(c.egnMasked),
+      inputmode: 'numeric', autocomplete: 'off', maxlength: 10, placeholder: c.egnMasked || '10 цифри',
+    }));
+}
+
 export const loginLabel = (c) => {
   const names = { local: 'Имейл и парола', google: 'Google', microsoft: 'Microsoft' };
   return `${names[c.provider] || c.provider} (${c.loginEmail})`;

@@ -135,7 +135,7 @@ export class GraphStore {
 // За тестове и локална разработка; не се използва в production.
 export class MemoryStore {
   constructor(seed = {}) {
-    this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], ...seed };
+    this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], changes: [], privacy: [], ...seed };
     this.sentMail = [];
   }
   async sendMail(from, to, subject, text) { this.sentMail.push({ from, to, subject, text }); }

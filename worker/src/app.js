@@ -1,11 +1,11 @@
-import { CATALOG, CONSENT_VERSION, STATUSES } from './catalog.js';
+import { CATALOG, CONSENT_VERSION, PRIVACY_RIGHTS, PRIVACY_STATUSES, STATUSES } from './catalog.js';
 import {
   b64url, hashPassword, randomCode, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
 } from './crypto.js';
 import { beginLogin, completeLogin, isProvider } from './oauth.js';
 import schema from './schema.json' with { type: 'json' };
 import {
-  clean, displayName, isValidEmail, maskEgn, passwordError, validateContact, validateRegistration,
+  clean, displayName, isValidEgnOrLnch, isValidEmail, maskEgn, passwordError, validateRegistration,
 } from './validate.js';
 
 export const SESSION_COOKIE = '__Host-ba_session';
@@ -23,6 +23,9 @@ const RESET_TTL_MS = 3600 * 1000;
 const VERIFY_TTL_MS = 7 * 24 * 3600 * 1000;
 const MAIL_THROTTLE_MS = 5 * 60 * 1000;
 const CLIENT_LABELS = Object.fromEntries(schema.clients.columns.map((c) => [c.name, c.label]));
+const SENSITIVE_FIELDS = ['egn', 'representativeEgn'];
+const MAX_OPEN_PRIVACY_REQUESTS = 5;
+const PRIVACY_CLOSED = ['Изпълнено', 'Отказано'];
 const PROVIDER_COLUMN = { google: 'googleId', microsoft: 'microsoftId' };
 const TOKEN_TABLE = { o: 'operators', c: 'accounts' };
 const ADMIN_ROLE = 'Администратор';
@@ -69,9 +72,17 @@ const newRequestId = (now) =>
 // Вътрешният идентификатор не излиза навън, а ЕГН се връща само маскирано.
 // Пълното ЕГН се чете само през отделното действие на оператор, което оставя запис.
 function publicClient(c) {
-  const { identity, egn, ...rest } = c;
-  return { ...rest, egnMasked: maskEgn(egn) };
+  const { identity, egn, representativeEgn, ...rest } = c;
+  return { ...rest, egnMasked: maskEgn(egn), representativeEgnMasked: maskEgn(representativeEgn) };
 }
+
+const addMonths = (date, months) => {
+  const next = new Date(date);
+  next.setUTCMonth(next.getUTCMonth() + months);
+  return next.toISOString().replace(/\.\d+Z$/, 'Z');
+};
+
+const shownValue = (key, value) => (SENSITIVE_FIELDS.includes(key) ? maskEgn(value) : value ?? '');
 function publicRequest(r) {
   const { assignedTo, ...rest } = r;
   return rest;
@@ -555,7 +566,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       action: 'Преглед на пълното ЕГН',
       visibility: 'Вътрешно',
     });
-    return json({ egn: client.egn });
+    return json({ egn: client.egn, representativeEgn: client.representativeEgn });
   }
 
   async function adminUpdateClient(request, id) {
@@ -565,32 +576,16 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const body = await readBody(request);
     const currentKind = client.companyName ? 'company' : 'individual';
     const kind = body.kind === 'company' || body.kind === 'individual' ? body.kind : currentKind;
-    const { fields, errors } = validateRegistration({ ...body, kind, consent: true }, { egnOptional: true });
+    const { fields, errors } = validateRegistration({ ...body, kind, consent: true });
     failIfErrors(errors);
-    if (kind === 'individual' && !fields.egn) delete fields.egn; // празно поле: ЕГН остава същото
-
-    const changed = Object.keys(fields).filter((key) => fields[key] !== (client[key] ?? ''));
-    if (!changed.length) return json({ client: publicClient(client) });
-
-    const updatedAt = nowIso();
-    await store.update('clients', id, { ...fields, updatedAt });
-    const next = { ...client, ...fields, updatedAt };
-
-    // Името и видът се пазят и в заявките, за да се виждат в таблицата със заявки.
-    const name = displayName(next);
-    if (name !== displayName(client) || next.personType !== client.personType) {
-      for (const row of await store.find('requests', 'clientId', id)) {
-        await store.update('requests', row.id, { clientName: name, personType: next.personType });
-      }
-    }
-    // В историята са само имената на полетата, без старите и новите стойности.
-    await addEvent({
-      requestId: id,
-      actorType: 'Оператор',
-      actorName: operator.fullName || operator.id,
-      action: `Редактирани данни: ${changed.map((key) => CLIENT_LABELS[key] || key).join(', ')}`,
-      visibility: 'Вътрешно',
-    });
+    // Празно поле за ЕГН означава „без промяна“, освен ако се сменя видът на лицето.
+    if (kind === currentKind) for (const key of SENSITIVE_FIELDS) if (!fields[key]) delete fields[key];
+    const next = await applyClientFields(
+      client,
+      fields,
+      { actorType: 'Оператор', actorName: operator.fullName || operator.id },
+      'Редактирани данни',
+    );
     return json({ client: publicClient(next) });
   }
 
@@ -642,11 +637,266 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function updateProfile(request) {
     const session = await requireSession(request);
     const client = await requireClient(session);
-    const { fields, errors } = validateContact(await readBody(request));
+    const kind = client.companyName ? 'company' : 'individual';
+    const { fields, errors } = validateRegistration({ ...(await readBody(request)), kind, consent: true });
     failIfErrors(errors);
-    const patch = { ...fields, updatedAt: nowIso() };
-    await store.update('clients', client.id, patch);
-    return json({ client: publicClient({ ...client, ...patch }) });
+    delete fields.personType;
+    for (const key of SENSITIVE_FIELDS) if (!fields[key]) delete fields[key]; // празно поле: без промяна
+
+    const changed = Object.keys(fields).filter((key) => fields[key] !== (client[key] ?? ''));
+    // Клиентът попълва сам само празно поле. Вече въведени данни се променят след одобрение.
+    const filled = Object.fromEntries(changed.filter((key) => !client[key]).map((key) => [key, fields[key]]));
+    const proposed = Object.fromEntries(changed.filter((key) => client[key]).map((key) => [key, fields[key]]));
+    const needsApproval = Object.keys(proposed).length > 0;
+
+    if (needsApproval) {
+      const pending = (await store.find('changes', 'clientId', client.id)).filter((c) => c.changeStatus === 'Чака');
+      if (pending.length) throw new HttpError(409, 'Вече имате промяна, която чака одобрение. Изчакайте решението.');
+    }
+    const next = Object.keys(filled).length
+      ? await applyClientFields(client, filled, { actorType: 'Клиент', actorName: displayName(client) }, 'Попълнени данни')
+      : client;
+    if (needsApproval) {
+      await store.create('changes', {
+        id: `CH-${crypto.randomUUID()}`,
+        createdAt: nowIso(),
+        clientId: client.id,
+        clientName: displayName(client),
+        changedFields: Object.keys(proposed).map((key) => CLIENT_LABELS[key] || key).join(', '),
+        proposedValues: JSON.stringify(proposed),
+        changeStatus: 'Чака',
+      });
+    }
+    return json({ client: publicClient(next), pendingApproval: needsApproval });
+  }
+
+  async function listOwnChanges(request) {
+    const client = await requireClient(await requireSession(request));
+    const rows = await store.find('changes', 'clientId', client.id);
+    return json({
+      changes: rows.sort(byNewest('createdAt')).map((c) => ({
+        id: c.id, createdAt: c.createdAt, changedFields: c.changedFields, changeStatus: c.changeStatus, reason: c.reason,
+      })),
+    });
+  }
+
+  // Записва промените, обновява името в заявките и оставя запис без стойностите.
+  async function applyClientFields(client, fields, actor, actionPrefix) {
+    const keys = Object.keys(fields).filter((key) => fields[key] !== (client[key] ?? ''));
+    if (!keys.length) return client;
+    const updatedAt = nowIso();
+    await store.update('clients', client.id, { ...fields, updatedAt });
+    const next = { ...client, ...fields, updatedAt };
+    const name = displayName(next);
+    if (name !== displayName(client) || next.personType !== client.personType) {
+      for (const row of await store.find('requests', 'clientId', client.id)) {
+        await store.update('requests', row.id, { clientName: name, personType: next.personType });
+      }
+    }
+    await addEvent({
+      ...actor,
+      requestId: client.id,
+      action: `${actionPrefix}: ${keys.map((key) => CLIENT_LABELS[key] || key).join(', ')}`,
+      visibility: 'Вътрешно',
+    });
+    return next;
+  }
+
+  // --- Промени за одобрение (оператори) ---
+
+  function changeView(change, client) {
+    let proposed = {};
+    try { proposed = JSON.parse(change.proposedValues || '{}'); } catch { /* показва се празен списък */ }
+    return {
+      id: change.id,
+      createdAt: change.createdAt,
+      clientId: change.clientId,
+      clientName: change.clientName,
+      hasSensitive: Object.keys(proposed).some((key) => SENSITIVE_FIELDS.includes(key)),
+      rows: Object.entries(proposed).map(([key, value]) => ({
+        key,
+        label: CLIENT_LABELS[key] || key,
+        from: shownValue(key, client?.[key]),
+        to: shownValue(key, value),
+      })),
+    };
+  }
+
+  async function findPendingChange(id) {
+    const [change] = await store.find('changes', 'id', id);
+    if (!change) throw new HttpError(404, 'Промяната не е намерена.');
+    if (change.changeStatus !== 'Чака') throw new HttpError(409, 'По тази промяна вече има решение.');
+    return change;
+  }
+
+  async function revealChange(request, id) {
+    const operator = requireOperator(await requireSession(request));
+    const change = await findPendingChange(id);
+    const proposed = JSON.parse(change.proposedValues || '{}');
+    const values = Object.fromEntries(SENSITIVE_FIELDS.filter((key) => proposed[key]).map((key) => [key, proposed[key]]));
+    await addEvent({
+      requestId: change.clientId,
+      actorType: 'Оператор',
+      actorName: operator.fullName || operator.id,
+      action: 'Преглед на предложено ЕГН',
+      visibility: 'Вътрешно',
+    });
+    return json({ values });
+  }
+
+  async function decideChange(request, id) {
+    const operator = requireOperator(await requireSession(request));
+    const body = await readBody(request);
+    const change = await findPendingChange(id);
+    const reason = clean(body.reason, 1000, { multiline: true });
+    const approve = body.decision === 'approve';
+    if (!approve && body.decision !== 'reject') throw new HttpError(422, 'Невалидно решение.');
+    if (!approve && !reason) throw new HttpError(422, 'Напишете причина за отказа.', { reason: 'Напишете причина за отказа.' });
+
+    const [client] = await store.find('clients', 'id', change.clientId);
+    if (!client) throw new HttpError(404, 'Клиентът не е намерен.');
+    const actor = { actorType: 'Оператор', actorName: operator.fullName || operator.id };
+    if (approve) await applyClientFields(client, JSON.parse(change.proposedValues), actor, 'Одобрена промяна');
+    else {
+      await addEvent({ ...actor, requestId: client.id, action: `Отказана промяна: ${change.changedFields}`, visibility: 'Вътрешно' });
+    }
+    // Предложените стойности (може да има и ЕГН) не се пазят след решението.
+    await store.update('changes', id, {
+      changeStatus: approve ? 'Одобрена' : 'Отказана',
+      decidedBy: actor.actorName,
+      decidedAt: nowIso(),
+      reason,
+      proposedValues: '',
+    });
+    await sendMail(env.MAIL_NOREPLY, client.contactEmail, approve ? 'Промяната в данните Ви е одобрена' : 'Промяната в данните Ви е отказана', [
+      'Здравейте,',
+      '',
+      approve
+        ? `Одобрихме промяната на: ${change.changedFields}.`
+        : `Не можем да приемем промяната на: ${change.changedFields}.`,
+      ...(approve ? [] : [`Причина: ${reason}`]),
+      '',
+      `Вашите данни: ${env.PORTAL_ORIGIN}/account.html#/profile`,
+    ]);
+    return json({ ok: true });
+  }
+
+  // --- Искания по ЗЗЛД и GDPR ---
+
+  const publicPrivacy = (p) => ({
+    id: p.id, createdAt: p.createdAt, dueAt: p.dueAt, rightType: p.rightType,
+    details: p.details, privacyStatus: p.privacyStatus, response: p.response, closedAt: p.closedAt,
+  });
+
+  async function listOwnPrivacy(request) {
+    const client = await requireClient(await requireSession(request));
+    const rows = await store.find('privacy', 'clientId', client.id);
+    return json({ requests: rows.sort(byNewest('createdAt')).map(publicPrivacy), rights: PRIVACY_RIGHTS });
+  }
+
+  async function createPrivacy(request) {
+    const client = await requireClient(await requireSession(request));
+    const body = await readBody(request);
+    const rightType = clean(body.rightType, 100);
+    const details = clean(body.details, 4000, { multiline: true });
+    const errors = {};
+    if (!PRIVACY_RIGHTS.includes(rightType)) errors.rightType = 'Изберете право.';
+    if (rightType === 'Друго' && details.length < 5) errors.details = 'Опишете искането си.';
+    failIfErrors(errors);
+    const open = (await store.find('privacy', 'clientId', client.id)).filter((p) => !PRIVACY_CLOSED.includes(p.privacyStatus));
+    if (open.length >= MAX_OPEN_PRIVACY_REQUESTS) {
+      throw new HttpError(429, `Имате твърде много отворени искания. Пишете на ${env.MAIL_DPO}.`);
+    }
+    const created = now();
+    const record = {
+      id: `DSR-${newRequestId(created).slice(3)}`,
+      createdAt: nowIso(),
+      dueAt: addMonths(created, 1), // чл. 12, пар. 3 от GDPR: до един месец
+      clientId: client.id,
+      clientName: displayName(client),
+      contactEmail: client.contactEmail,
+      rightType,
+      details,
+      privacyStatus: 'Подадено',
+    };
+    await store.create('privacy', record);
+    await sendMail(env.MAIL_NOREPLY, env.MAIL_DPO, `Ново искание за лични данни ${record.id}`, [
+      `Право: ${rightType}`,
+      `Срок за отговор: ${record.dueAt.slice(0, 10)}`,
+      '',
+      `Обработка: ${env.PORTAL_ORIGIN}/admin.html#/privacy`,
+    ]);
+    await sendMail(env.MAIL_NOREPLY, client.contactEmail, `Искането Ви ${record.id} е получено`, [
+      'Здравейте,',
+      '',
+      `Получихме искането Ви: ${rightType}. Ще отговорим до ${record.dueAt.slice(0, 10)}.`,
+      '',
+      `Проследяване: ${env.PORTAL_ORIGIN}/account.html#/privacy`,
+    ]);
+    return json({ request: publicPrivacy(record) }, 201);
+  }
+
+  async function updatePrivacy(request, id) {
+    const admin = requireAdmin(await requireSession(request));
+    const body = await readBody(request);
+    const [record] = await store.find('privacy', 'id', id);
+    if (!record) throw new HttpError(404, 'Искането не е намерено.');
+    const patch = { handledBy: admin.fullName || admin.id };
+    if (body.response !== undefined) patch.response = clean(body.response, 4000, { multiline: true });
+    if (body.extend === true) {
+      patch.privacyStatus = 'Удължен срок';
+      patch.dueAt = addMonths(record.createdAt, 3); // чл. 12, пар. 3: с още два месеца при сложни искания
+    } else if (body.privacyStatus !== undefined) {
+      if (!PRIVACY_STATUSES.includes(body.privacyStatus)) throw new HttpError(422, 'Невалиден статус.');
+      patch.privacyStatus = body.privacyStatus;
+    }
+    const nextStatus = patch.privacyStatus || record.privacyStatus;
+    if (PRIVACY_CLOSED.includes(nextStatus) && !(patch.response ?? record.response)) {
+      throw new HttpError(422, 'Напишете отговор, преди да приключите искането.', { response: 'Напишете отговор към лицето.' });
+    }
+    if (PRIVACY_CLOSED.includes(nextStatus) && !record.closedAt) patch.closedAt = nowIso();
+    await store.update('privacy', id, patch);
+    await addEvent({
+      requestId: id,
+      actorType: 'Оператор',
+      actorName: patch.handledBy,
+      action: `Искане за лични данни: ${nextStatus}`,
+      visibility: 'Вътрешно',
+    });
+    if (nextStatus !== record.privacyStatus) {
+      await sendMail(env.MAIL_NOREPLY, record.contactEmail, `Искане ${id}: статус „${nextStatus}“`, [
+        'Здравейте,',
+        '',
+        `Статусът на искането Ви (${record.rightType}) вече е „${nextStatus}“.`,
+        ...(patch.dueAt ? [`Новият срок за отговор е ${patch.dueAt.slice(0, 10)}.`] : []),
+        '',
+        `Подробности: ${env.PORTAL_ORIGIN}/account.html#/privacy`,
+      ]);
+    }
+    return json({ request: { ...record, ...patch } });
+  }
+
+  // Всички данни за лицето, за отговор на искане за достъп или преносимост. Записва се кой ги е изтеглил.
+  async function exportClient(request, id) {
+    const admin = requireAdmin(await requireSession(request));
+    const [client] = await store.find('clients', 'id', id);
+    if (!client) throw new HttpError(404, 'Клиентът не е намерен.');
+    const { identity, ...profile } = client;
+    const requests = await store.find('requests', 'clientId', id);
+    const messages = [];
+    for (const row of requests) {
+      const events = await store.find('events', 'requestId', row.id);
+      messages.push(...events.filter((e) => e.visibility === 'Клиент').map(({ visibility, ...e }) => e));
+    }
+    const privacy = (await store.find('privacy', 'clientId', id)).map(publicPrivacy);
+    await addEvent({
+      requestId: id,
+      actorType: 'Оператор',
+      actorName: admin.fullName || admin.id,
+      action: 'Експорт на всички лични данни',
+      visibility: 'Вътрешно',
+    });
+    return json({ exportedAt: nowIso(), profile, requests, messages, privacyRequests: privacy });
   }
 
   async function listOwnRequests(request) {
@@ -672,12 +922,22 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (!category) errors.serviceCategory = 'Изберете категория.';
     else if (!category.services.includes(service)) errors.service = 'Изберете услуга.';
     if (details.length < 10) errors.details = 'Опишете накратко какво трябва да се свърши.';
+    // Някои услуги изискват ЕГН/ЛНЧ; ако липсва в профила, клиентът го въвежда със заявката.
+    const identityField = client.companyName ? 'representativeEgn' : 'egn';
+    const identityNumber = clean(body.identityNumber, 10);
+    const needsIdentity = !!category?.requiresIdentity && !client[identityField];
+    if (needsIdentity && !isValidEgnOrLnch(identityNumber)) {
+      errors.identityNumber = 'Тази услуга изисква валидно ЕГН или ЛНЧ от 10 цифри.';
+    }
     failIfErrors(errors);
 
     const own = await store.find('requests', 'clientId', client.id);
     const since = now().getTime() - DAY_MS;
     if (own.filter((r) => Date.parse(r.createdAt) > since).length >= MAX_REQUESTS_PER_DAY) {
       throw new HttpError(429, 'Достигнахте лимита за нови заявки за денонощие. Свържете се с нас на call@buladmin.eu.');
+    }
+    if (needsIdentity) {
+      await applyClientFields(client, { [identityField]: identityNumber }, { actorType: 'Клиент', actorName: displayName(client) }, 'Попълнени данни');
     }
 
     const at = nowIso();
@@ -756,12 +1016,18 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
   async function adminOverview(request) {
     const viewer = requireOperator(await requireSession(request));
-    const [requests, clients, operators] = await Promise.all([
+    const isAdmin = viewer.role === ADMIN_ROLE;
+    const [requests, clients, operators, changes, privacy] = await Promise.all([
       store.list('requests'),
       store.list('clients'),
       store.list('operators'),
+      store.find('changes', 'changeStatus', 'Чака'),
+      isAdmin ? store.list('privacy') : [],
     ]);
+    const clientById = new Map(clients.map((c) => [c.id, c]));
     return json({
+      changes: changes.sort(byOldest('createdAt')).map((c) => changeView(c, clientById.get(c.clientId))),
+      privacy: isAdmin ? privacy.sort(byOldest('dueAt')) : undefined,
       requests: requests.sort(byNewest('createdAt')),
       clients: clients.sort(byNewest('createdAt')).map(publicClient),
       operators: operators.filter((o) => o.isActive === 'Да').map((o) => ({ email: o.id, name: o.fullName })),
@@ -873,7 +1139,20 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const method = request.method;
     let m;
 
-    if (method === 'GET' && path === '/api/meta') return json({ catalog: CATALOG, statuses: STATUSES, mailEnabled });
+    if (method === 'GET' && path === '/api/meta') {
+      return json({
+        catalog: CATALOG, statuses: STATUSES, mailEnabled, privacyRights: PRIVACY_RIGHTS, privacyStatuses: PRIVACY_STATUSES, dpoEmail: env.MAIL_DPO,
+      });
+    }
+    if (method === 'GET' && path === '/api/profile/changes') return listOwnChanges(request);
+    if (path === '/api/privacy-requests') {
+      if (method === 'GET') return listOwnPrivacy(request);
+      if (method === 'POST') return createPrivacy(request);
+    }
+    if (method === 'PATCH' && (m = path.match(/^\/api\/admin\/privacy-requests\/([\w-]{1,40})$/))) return updatePrivacy(request, m[1]);
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/clients\/([\w-]{1,60})\/export$/))) return exportClient(request, m[1]);
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/changes\/([\w-]{1,60})\/reveal$/))) return revealChange(request, m[1]);
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/changes\/([\w-]{1,60})$/))) return decideChange(request, m[1]);
     if (method === 'POST' && path === '/api/auth/forgot') return forgotPassword(request, ctx);
     if (method === 'POST' && path === '/api/auth/verify-email') return verifyEmail(request);
     if (method === 'POST' && path === '/api/auth/resend-verification') return resendVerification(request);
@@ -925,8 +1204,15 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       }
       return await route(request, new URL(request.url), ctx);
     } catch (err) {
-      if (err instanceof HttpError) return json({ error: { message: err.message, fields: err.fields } }, err.status);
-      console.error('unhandled', err.message);
+      const known = err instanceof HttpError;
+      if (!known) console.error('unhandled', err.message);
+      // Браузър, отворил адреса директно (например след вход), вижда страница, а не суров отговор.
+      if (request.method === 'GET' && (request.headers.get('accept') || '').includes('text/html')) {
+        const status = known ? err.status : 500;
+        const pages = { 401: '/', 403: '/403.html', 404: '/404.html' };
+        return redirect(pages[status] || '/500.html');
+      }
+      if (known) return json({ error: { message: err.message, fields: err.fields } }, err.status);
       return json({ error: { message: 'Възникна грешка. Опитайте отново след малко.' } }, 500);
     }
   };

@@ -20,6 +20,7 @@ const env = {
   MAIL_ENABLED: process.env.DEV_MAIL ? 'true' : 'false',
   MAIL_ACCOUNTS: 'accounts@portal.buladmin.eu',
   MAIL_NOREPLY: 'no-reply@portal.buladmin.eu',
+  MAIL_DPO: 'dpo@buladmin.eu',
 };
 const DEV_SETUP_TOKEN = 'o.dev-setup';
 
@@ -111,7 +112,8 @@ createServer(async (req_, res) => {
     res.writeHead(200, { 'content-type': MIME[extname(rel)] || 'application/octet-stream' });
     res.end(data);
   } catch {
-    res.writeHead(404);
-    res.end('Not found');
+    // Както GitHub Pages: непознат адрес получава 404 страницата.
+    res.writeHead(404, { 'content-type': MIME['.html'] });
+    res.end(await readFile(join(ROOT, '404.html')));
   }
 }).listen(PORT, () => console.log(`${ORIGIN}\n  /dev/login?as=client | fresh | operator`));

@@ -1,5 +1,5 @@
 import {
-  api, contactFields, fatal, field, formatDate, formatTime, formValues, h, linkBox, loginLabel, mount, securityCards, showError,
+  api, contactFields, fatal, formatDate, formatTime, formValues, h, identityFields, linkBox, loginLabel, mount, securityCards, showError,
   showFieldErrors, statusPill,
 } from './core.js';
 
@@ -21,9 +21,14 @@ function page(...children) {
   main.replaceChildren(h('div', { class: 'wrap section' }, children));
 }
 
+const PRIVACY_CLOSED = ['Изпълнено', 'Отказано'];
+const openPrivacy = () => (data?.privacy || []).filter((p) => !PRIVACY_CLOSED.includes(p.privacyStatus)).length;
+
 const tabs = (current) => h('nav', { class: 'tabs', 'aria-label': 'Раздели' },
   h('a', { href: '#/', 'aria-current': current === 'requests' ? 'page' : null }, 'Заявки'),
   h('a', { href: '#/clients', 'aria-current': current === 'clients' ? 'page' : null }, 'Клиенти'),
+  h('a', { href: '#/changes', 'aria-current': current === 'changes' ? 'page' : null }, `Промени${data?.changes?.length ? ` (${data.changes.length})` : ''}`),
+  data?.privacy && h('a', { href: '#/privacy', 'aria-current': current === 'privacy' ? 'page' : null }, `Лични данни${openPrivacy() ? ` (${openPrivacy()})` : ''}`),
   data?.team && h('a', { href: '#/operators', 'aria-current': current === 'operators' ? 'page' : null }, 'Оператори'),
   h('a', { href: '#/me', 'aria-current': current === 'me' ? 'page' : null }, 'Моят акаунт'));
 
@@ -100,13 +105,14 @@ async function viewClient(id) {
   const notice = h('div', { 'aria-live': 'polite' });
 
   // Пълното ЕГН се зарежда само при изрично действие, което остава в историята.
-  const egnValue = h('span', {}, c.egnMasked);
-  const reveal = c.egnMasked && h('button', {
+  const maskedIdentity = c.egnMasked || c.representativeEgnMasked;
+  const egnValue = h('span', {}, maskedIdentity);
+  const reveal = maskedIdentity && h('button', {
     class: 'link-btn small', type: 'button',
     onclick: async () => {
       try {
-        const { egn } = await api(`${url}/egn`, { method: 'POST' });
-        egnValue.textContent = egn;
+        const { egn, representativeEgn } = await api(`${url}/egn`, { method: 'POST' });
+        egnValue.textContent = egn || representativeEgn;
         reveal.remove();
       } catch (err) {
         showError(notice, err.message);
@@ -114,19 +120,8 @@ async function viewClient(id) {
     },
   }, 'Покажи');
 
-  const individual = h('div', { class: 'form__grid' },
-    field({ name: 'firstName', label: 'Име', value: c.firstName, maxlength: 80 }),
-    field({ name: 'middleName', label: 'Презиме', value: c.middleName, maxlength: 80 }),
-    field({ name: 'lastName', label: 'Фамилия', value: c.lastName, maxlength: 80 }),
-    field({
-      name: 'egn', label: 'ЕГН или ЛНЧ', hint: c.egnMasked ? 'празно: без промяна' : '', inputmode: 'numeric',
-      autocomplete: 'off', maxlength: 10, placeholder: c.egnMasked,
-    }));
-  const company = h('div', { class: 'form__grid' },
-    field({ name: 'companyName', label: 'Наименование на фирмата', value: c.companyName, maxlength: 200, wrapClass: 'full' }),
-    field({ name: 'eik', label: 'ЕИК/БУЛСТАТ', value: c.eik, inputmode: 'numeric', maxlength: 13 }),
-    field({ name: 'vatNumber', label: 'ДДС номер', value: c.vatNumber, maxlength: 12 }),
-    field({ name: 'representative', label: 'Представляващ', value: c.representative, maxlength: 160, wrapClass: 'full' }));
+  const individual = identityFields('individual', c);
+  const company = identityFields('company', c);
   const groups = { individual, company };
   const applyKind = (kind) => {
     for (const [key, group] of Object.entries(groups)) {
@@ -192,8 +187,27 @@ async function viewClient(id) {
               h('div', { class: 'timeline__head' }, h('span', {}, `${e.actorName} · ${e.action}`), h('time', { datetime: e.occurredAt }, formatTime(e.occurredAt))))))
           : h('div', { class: 'empty' }, 'Няма записани промени.')),
       h('aside', { class: 'stack' },
-        c.egnMasked && h('div', { class: 'card' },
-          h('h2', { style: 'margin-bottom:8px' }, 'ЕГН/ЛНЧ'),
+        data?.team && h('div', { class: 'card stack' },
+          h('h2', {}, 'Искане за достъп'),
+          h('p', { class: 'small muted' }, 'Изтегля всички данни на лицето, за отговор на искане за достъп или преносимост. Действието се записва.'),
+          h('button', {
+            class: 'btn btn--ghost btn--small', type: 'button',
+            onclick: async () => {
+              try {
+                const payload = await api(`${url}/export`, { method: 'POST' });
+                const link = h('a', {
+                  href: URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })),
+                  download: `lichni-danni-${c.id}.json`,
+                });
+                link.click();
+                URL.revokeObjectURL(link.href);
+              } catch (err) {
+                showError(notice, err.message);
+              }
+            },
+          }, 'Изтеглете данните')),
+        maskedIdentity && h('div', { class: 'card' },
+          h('h2', { style: 'margin-bottom:8px' }, c.egnMasked ? 'ЕГН/ЛНЧ' : 'ЕГН/ЛНЧ на представляващия'),
           h('p', { class: 'row' }, egnValue, reveal),
           h('p', { class: 'small muted', style: 'margin-top:8px' }, 'Всеки преглед на пълното ЕГН се записва в историята.')),
         h('div', { class: 'card stack' },
@@ -208,6 +222,105 @@ async function viewClient(id) {
                 h('div', { class: 'req-item__meta' }, `№ ${r.id} · ${formatDate(r.createdAt)}`))))
             : h('p', { class: 'muted' }, 'Няма заявки.')))),
   );
+}
+
+function viewChanges() {
+  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
+  const reload = async () => {
+    data = await api('/admin/overview');
+    viewChanges();
+    window.scrollTo(0, 0);
+  };
+  const card = (change) => {
+    const toCells = new Map();
+    const reason = h('textarea', { 'aria-label': 'Причина за отказ', maxlength: 1000, placeholder: 'Причина, ако отказвате' });
+    const decide = (decision) => async () => {
+      notice.replaceChildren();
+      try {
+        await api(`/admin/changes/${encodeURIComponent(change.id)}`, { method: 'POST', body: { decision, reason: reason.value } });
+        await reload();
+      } catch (err) {
+        showError(notice, err.message);
+        window.scrollTo(0, 0);
+      }
+    };
+    const reveal = change.hasSensitive && h('button', {
+      class: 'link-btn small', type: 'button',
+      onclick: async () => {
+        try {
+          const { values } = await api(`/admin/changes/${encodeURIComponent(change.id)}/reveal`, { method: 'POST' });
+          for (const [key, value] of Object.entries(values)) toCells.get(key).textContent = value;
+          reveal.remove();
+        } catch (err) {
+          showError(notice, err.message);
+        }
+      },
+    }, 'Покажи предложеното ЕГН');
+    return h('div', { class: 'card stack' },
+      h('div', { class: 'row row--between' },
+        h('h2', {}, h('a', { href: `#/c/${change.clientId}` }, change.clientName)),
+        h('span', { class: 'small muted' }, formatTime(change.createdAt))),
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Поле', 'Сега', 'Предложено'].map((t) => h('th', { scope: 'col' }, t)))),
+        h('tbody', {}, change.rows.map((row) => {
+          const cell = h('td', { 'data-label': 'Предложено' }, h('strong', {}, row.to || '(празно)'));
+          toCells.set(row.key, cell);
+          return h('tr', {}, h('td', {}, row.label), h('td', { 'data-label': 'Сега' }, row.from), cell);
+        })))),
+      reveal,
+      h('div', { class: 'field' }, reason),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn btn--small', type: 'button', onclick: decide('approve') }, 'Одобрете'),
+        h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: decide('reject') }, 'Откажете')));
+  };
+  page(tabs('changes'), notice,
+    data.changes.length
+      ? h('div', { class: 'stack' }, data.changes.map(card))
+      : h('div', { class: 'empty' }, 'Няма промени, които чакат одобрение.'));
+}
+
+function viewPrivacyRequests() {
+  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
+  const nowMs = Date.now();
+  const card = (p) => {
+    const closed = PRIVACY_CLOSED.includes(p.privacyStatus);
+    const overdue = !closed && Date.parse(p.dueAt) < nowMs;
+    const url = `/admin/privacy-requests/${encodeURIComponent(p.id)}`;
+    const response = h('textarea', { 'aria-label': 'Отговор към лицето', value: p.response, maxlength: 4000, placeholder: 'Отговор, който лицето вижда в профила си' });
+    const status = h('select', { 'aria-label': 'Статус' }, meta.privacyStatuses.map((s) => h('option', { value: s, selected: s === p.privacyStatus }, s)));
+    const send = async (body) => {
+      notice.replaceChildren();
+      try {
+        await api(url, { method: 'PATCH', body });
+        data = await api('/admin/overview');
+        viewPrivacyRequests();
+      } catch (err) {
+        showError(notice, err.message);
+      }
+      window.scrollTo(0, 0);
+    };
+    return h('div', { class: 'card stack' },
+      h('div', { class: 'row row--between' },
+        h('h2', {}, p.rightType),
+        h('span', { class: 'pill', 'data-privacy': p.privacyStatus }, p.privacyStatus)),
+      h('p', { class: `small ${overdue ? 'text-error' : 'muted'}` },
+        `№ ${p.id} · подадено ${formatDate(p.createdAt)} · срок до ${formatDate(p.dueAt)}${overdue ? ' · ПРОСРОЧЕНО' : ''}`),
+      h('p', {}, h('a', { href: `#/c/${p.clientId}` }, p.clientName), ` · ${p.contactEmail}`),
+      p.details && h('p', { class: 'pre' }, p.details),
+      h('div', { class: 'field' }, response),
+      h('div', { class: 'row' },
+        status,
+        h('button', { class: 'btn btn--small', type: 'button', onclick: () => send({ privacyStatus: status.value, response: response.value }) }, 'Запазете'),
+        !closed && p.privacyStatus !== 'Удължен срок' && h('button', {
+          class: 'btn btn--ghost btn--small', type: 'button', onclick: () => send({ extend: true, response: response.value }),
+        }, 'Удължете срока с 2 месеца')));
+  };
+  const active = data.privacy.filter((p) => !PRIVACY_CLOSED.includes(p.privacyStatus));
+  const done = data.privacy.filter((p) => PRIVACY_CLOSED.includes(p.privacyStatus));
+  page(tabs('privacy'), notice,
+    data.privacy.length
+      ? h('div', { class: 'stack' }, active.map(card), done.length > 0 && h('h2', {}, 'Приключени'), done.map(card))
+      : h('div', { class: 'empty' }, 'Няма подадени искания за лични данни.'));
 }
 
 function viewClients() {
@@ -327,6 +440,7 @@ function clientCard(c) {
     h('dt', {}, 'Вид'), h('dd', {}, c.personType),
     h('dt', {}, isCompany ? 'Фирма' : 'Име'), h('dd', {}, h('a', { href: `#/c/${c.id}` }, isCompany ? c.companyName : [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' '))),
     !isCompany && c.egnMasked && [h('dt', {}, 'ЕГН/ЛНЧ'), h('dd', {}, c.egnMasked)],
+    isCompany && c.representativeEgnMasked && [h('dt', {}, 'ЕГН/ЛНЧ на представляващия'), h('dd', {}, c.representativeEgnMasked)],
     isCompany && [h('dt', {}, 'ЕИК'), h('dd', {}, c.eik)],
     isCompany && c.vatNumber && [h('dt', {}, 'ДДС'), h('dd', {}, c.vatNumber)],
     isCompany && [h('dt', {}, 'Представляващ'), h('dd', {}, c.representative)],
@@ -442,6 +556,8 @@ async function route() {
       data = await api('/admin/overview');
       if (hash === '/clients') viewClients();
       else if (hash === '/me') viewMe();
+      else if (hash === '/changes') viewChanges();
+      else if (hash === '/privacy' && data.privacy) viewPrivacyRequests();
       else if (hash === '/operators' && data.team) viewOperators();
       else viewRequests();
     }

@@ -1,4 +1,4 @@
-import { api, contactFields, fatal, field, formValues, h, mount, showError, showFieldErrors } from './core.js';
+import { api, contactFields, fatal, formValues, h, identityFields, mount, showError, showFieldErrors } from './core.js';
 
 async function init() {
   const me = await api('/me');
@@ -9,17 +9,9 @@ async function init() {
   const main = mount({ user: me.identity.email || me.identity.name });
   const alert = h('div', { 'aria-live': 'polite' });
 
-  const individual = h('div', { class: 'form__grid', 'data-kind': 'individual' },
-    field({ name: 'firstName', label: 'Име', value: me.identity.firstName, autocomplete: 'given-name', maxlength: 80 }),
-    field({ name: 'middleName', label: 'Презиме', hint: 'по желание', autocomplete: 'additional-name', maxlength: 80 }),
-    field({ name: 'lastName', label: 'Фамилия', value: me.identity.lastName, autocomplete: 'family-name', maxlength: 80 }),
-    field({ name: 'egn', label: 'ЕГН или ЛНЧ', inputmode: 'numeric', autocomplete: 'off', maxlength: 10, placeholder: '10 цифри' }));
-
-  const company = h('div', { class: 'form__grid', 'data-kind': 'company', hidden: true },
-    field({ name: 'companyName', label: 'Наименование на фирмата', autocomplete: 'organization', maxlength: 200, wrapClass: 'full' }),
-    field({ name: 'eik', label: 'ЕИК/БУЛСТАТ', inputmode: 'numeric', maxlength: 13, placeholder: '9 или 13 цифри' }),
-    field({ name: 'vatNumber', label: 'ДДС номер', hint: 'ако има', maxlength: 12, placeholder: 'BG123456789' }),
-    field({ name: 'representative', label: 'Представляващ', maxlength: 160, wrapClass: 'full' }));
+  const individual = identityFields('individual', { firstName: me.identity.firstName, lastName: me.identity.lastName });
+  const company = identityFields('company');
+  company.hidden = true;
 
   const kindOption = (value, title, text, checked) =>
     h('label', {},
@@ -50,6 +42,7 @@ async function init() {
     individual,
     company,
     h('div', { class: 'form__grid' }, contact),
+    h('p', { class: 'small muted' }, 'След като запазите данните, промените по тях се одобряват от оператор.'),
     h('div', { class: 'field' },
       h('label', { class: 'check' },
         h('input', { type: 'checkbox', name: 'consent' }),

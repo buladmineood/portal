@@ -529,9 +529,11 @@ test('ЕГН/ЛНЧ: контролни цифри и дати, сметнати
   // Месец 02, ден 31 е невалидна дата; контролната цифра по ЕГН не спасява, а ЛНЧ не съвпада.
   assert.equal(isValidEgnOrLnch('7502310010'), false);
   assert.equal(validateRegistration({ ...individual, egn: '7501020017' }).errors.egn !== undefined, true);
-  assert.equal(validateRegistration({ ...individual, egn: '' }).errors.egn !== undefined, true);
-  assert.equal(validateRegistration({ ...individual, egn: '' }, { egnOptional: true }).errors.egn, undefined);
+  assert.equal(validateRegistration({ ...individual, egn: '' }).errors.egn, undefined); // по желание при регистрация
   assert.equal(validateRegistration({ ...company, egn: '7501020018' }).fields.egn, '');
+  assert.ok(validateRegistration({ ...company, representativeEgn: '123' }).errors.representativeEgn);
+  assert.equal(validateRegistration({ ...company, representativeEgn: '7501020018' }).fields.representativeEgn, '7501020018');
+  assert.equal(validateRegistration({ ...individual, representativeEgn: '7501020018' }).fields.representativeEgn, '');
 });
 
 test('ЕГН: записва се, но излиза само маскирано', async () => {
@@ -593,13 +595,207 @@ test('редакция от оператор: невалидни данни и �
   assert.equal(store.tables.clients[0].eik, '130460283');
 });
 
+// --- ЕГН според услугата ---
+
+const noIdentityBody = { ...individual, egn: '' };
+const freeRequest = { serviceCategory: 'Електронни услуги', service: 'Портали', details: 'Нужна ми е помощ с портал.' };
+
+test('услуга с ЕГН: отказва без него, приема го със заявката и го пази в профила', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'alice', body: noIdentityBody });
+  assert.equal((await call(app, 'POST', '/api/requests', { as: 'alice', body: freeRequest })).status, 201);
+  const refused = await call(app, 'POST', '/api/requests', { as: 'alice', body: newRequest });
+  assert.equal(refused.status, 422);
+  assert.ok(refused.data.error.fields.identityNumber);
+  assert.equal((await call(app, 'POST', '/api/requests', { as: 'alice', body: { ...newRequest, identityNumber: '111' } })).status, 422);
+  assert.equal((await call(app, 'POST', '/api/requests', { as: 'alice', body: { ...newRequest, identityNumber: '7501020018' } })).status, 201);
+  assert.equal(store.tables.clients[0].egn, '7501020018');
+  // Вече въведено ЕГН не може да се смени през заявка.
+  await call(app, 'POST', '/api/requests', { as: 'alice', body: { ...newRequest, identityNumber: '1234567893' } });
+  assert.equal(store.tables.clients[0].egn, '7501020018');
+});
+
+test('услуга с ЕГН: за фирма се иска ЕГН на представляващия', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  const refused = await call(app, 'POST', '/api/requests', { as: 'bob', body: newRequest });
+  assert.ok(refused.data.error.fields.identityNumber);
+  assert.equal((await call(app, 'POST', '/api/requests', { as: 'bob', body: { ...newRequest, identityNumber: '7501020018' } })).status, 201);
+  const [row] = store.tables.clients;
+  assert.equal(row.representativeEgn, '7501020018');
+  assert.equal(row.egn, '');
+  const me = await call(app, 'GET', '/api/me', { as: 'bob' });
+  assert.equal(me.data.client.representativeEgnMasked, '••••••••18');
+  assert.ok(!JSON.stringify(me.data).includes('7501020018'));
+});
+
+// --- Промени с одобрение ---
+
+const editBody = (over = {}) => ({ ...individual, egn: '', ...over });
+
+test('клиент: въведени данни не се променят без одобрение, празни се попълват веднага', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'alice', body: noIdentityBody });
+  const res = await call(app, 'PATCH', '/api/profile', {
+    as: 'alice', body: editBody({ phone: '0888000111', firstName: 'Нова', middleName: 'Средна', egn: '7501020018' }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.pendingApproval, true);
+  const [row] = store.tables.clients;
+  assert.equal(row.firstName, 'Алис'); // чака одобрение
+  assert.equal(row.phone, '+359 888 123 456'); // чака одобрение
+  assert.equal(row.middleName, 'Средна'); // беше празно
+  assert.equal(row.egn, '7501020018'); // беше празно
+  assert.equal(store.tables.changes[0].changeStatus, 'Чака');
+  assert.equal((await call(app, 'PATCH', '/api/profile', { as: 'alice', body: editBody({ phone: '0888000222', firstName: 'Друга' }) })).status, 409);
+});
+
+test('клиент: не може да смени вида лице или въведено ЕГН сам', async () => {
+  const { app, store } = setup();
+  await registered(app);
+  await call(app, 'PATCH', '/api/profile', { as: 'alice', body: { ...company, kind: 'company' } });
+  assert.equal(store.tables.clients[0].personType, 'Физическо лице');
+  await call(app, 'PATCH', '/api/profile', { as: 'alice', body: editBody({ egn: '1234567893' }) });
+  assert.equal(store.tables.clients[0].egn, '7501020018');
+  assert.ok(store.tables.changes[0].changedFields.includes('ЕГН/ЛНЧ'));
+});
+
+test('одобрение: само оператор, данните влизат, стойностите се изтриват, без изтичане на ЕГН', async () => {
+  const { app, store } = setup();
+  await registered(app);
+  await call(app, 'PATCH', '/api/profile', { as: 'alice', body: editBody({ phone: '0888000111', egn: '1234567893' }) });
+  const overview = await call(app, 'GET', '/api/admin/overview', { as: 'plain' });
+  const [view] = overview.data.changes;
+  assert.ok(!JSON.stringify(overview.data).includes('1234567893'));
+  assert.ok(!JSON.stringify(overview.data).includes('7501020018'));
+  assert.ok(view.hasSensitive);
+  const { id } = view;
+
+  assert.equal((await call(app, 'POST', `/api/admin/changes/${id}`, { as: 'alice', body: { decision: 'approve' } })).status, 403);
+  assert.equal((await call(app, 'POST', `/api/admin/changes/${id}/reveal`, { as: 'alice' })).status, 403);
+  const reveal = await call(app, 'POST', `/api/admin/changes/${id}/reveal`, { as: 'plain' });
+  assert.equal(reveal.data.values.egn, '1234567893');
+  assert.equal((await call(app, 'POST', `/api/admin/changes/${id}`, { as: 'plain', body: { decision: 'approve' } })).status, 200);
+
+  const [row] = store.tables.clients;
+  assert.equal(row.phone, '0888000111');
+  assert.equal(row.egn, '1234567893');
+  const change = store.tables.changes[0];
+  assert.equal(change.changeStatus, 'Одобрена');
+  assert.equal(change.proposedValues, '');
+  assert.equal(change.decidedBy, 'Обикновен');
+  assert.ok(store.tables.events.some((e) => e.action.startsWith('Одобрена промяна') && !JSON.stringify(e).includes('0888000111')));
+  assert.equal((await call(app, 'POST', `/api/admin/changes/${id}`, { as: 'plain', body: { decision: 'approve' } })).status, 409);
+});
+
+test('отказ: иска причина, данните остават, клиентът я вижда', async () => {
+  const { app, store } = setup();
+  await registered(app);
+  await call(app, 'PATCH', '/api/profile', { as: 'alice', body: editBody({ phone: '0888000111' }) });
+  const { id } = store.tables.changes[0];
+  assert.equal((await call(app, 'POST', `/api/admin/changes/${id}`, { as: 'op', body: { decision: 'reject' } })).status, 422);
+  assert.equal((await call(app, 'POST', `/api/admin/changes/${id}`, { as: 'op', body: { decision: 'reject', reason: 'Няма документ.' } })).status, 200);
+  assert.equal(store.tables.clients[0].phone, '+359 888 123 456');
+  assert.equal(store.tables.changes[0].proposedValues, '');
+  const own = await call(app, 'GET', '/api/profile/changes', { as: 'alice' });
+  assert.equal(own.data.changes[0].changeStatus, 'Отказана');
+  assert.equal(own.data.changes[0].reason, 'Няма документ.');
+  assert.equal(own.data.changes[0].proposedValues, undefined);
+  // След решение клиентът може да предложи нова промяна.
+  assert.equal((await call(app, 'PATCH', '/api/profile', { as: 'alice', body: editBody({ phone: '0888000222' }) })).data.pendingApproval, true);
+});
+
+test('оператор редактира директно, без одобрение', async () => {
+  const { app, store } = setup();
+  await registered(app);
+  const { id } = store.tables.clients[0];
+  const res = await call(app, 'PATCH', `/api/admin/clients/${id}`, { as: 'plain', body: { ...individual, phone: '0888000333' } });
+  assert.equal(res.status, 200);
+  assert.equal(store.tables.clients[0].phone, '0888000333');
+  assert.equal(store.tables.changes.length, 0);
+});
+
+// --- Искания по ЗЗЛД и GDPR ---
+
+const RIGHT = 'Достъп до данните (чл. 15)';
+
+test('искане за лични данни: срок 1 месец, вижда го само собственикът, само администратор обработва', async () => {
+  const { app, store } = setup();
+  await registered(app);
+  await registered(app, 'bob');
+  assert.equal((await call(app, 'POST', '/api/privacy-requests', { as: 'alice', body: { rightType: 'Измислено' } })).status, 422);
+  assert.equal((await call(app, 'POST', '/api/privacy-requests', { as: 'alice', body: { rightType: 'Друго' } })).status, 422);
+  const created = await call(app, 'POST', '/api/privacy-requests', { as: 'alice', body: { rightType: RIGHT, details: 'Какви данни пазите?' } });
+  assert.equal(created.status, 201);
+  const { id, dueAt, createdAt } = created.data.request;
+  assert.ok(id.startsWith('DSR-'));
+  const diff = (Date.parse(dueAt) - Date.parse(createdAt)) / 864e5;
+  assert.ok(diff >= 28 && diff <= 31, `срок ${diff}`);
+
+  assert.equal((await call(app, 'GET', '/api/privacy-requests', { as: 'bob' })).data.requests.length, 0);
+  assert.equal((await call(app, 'GET', '/api/admin/overview', { as: 'plain' })).data.privacy, undefined);
+  assert.equal((await call(app, 'GET', '/api/admin/overview', { as: 'op' })).data.privacy.length, 1);
+  assert.equal((await call(app, 'PATCH', `/api/admin/privacy-requests/${id}`, { as: 'plain', body: { privacyStatus: 'Изпълнено' } })).status, 403);
+  assert.equal((await call(app, 'PATCH', `/api/admin/privacy-requests/${id}`, { as: 'alice', body: { privacyStatus: 'Изпълнено' } })).status, 403);
+
+  const noAnswer = await call(app, 'PATCH', `/api/admin/privacy-requests/${id}`, { as: 'op', body: { privacyStatus: 'Изпълнено' } });
+  assert.equal(noAnswer.status, 422);
+  const extended = await call(app, 'PATCH', `/api/admin/privacy-requests/${id}`, { as: 'op', body: { extend: true } });
+  assert.equal(extended.data.request.privacyStatus, 'Удължен срок');
+  assert.ok(Date.parse(extended.data.request.dueAt) > Date.parse(dueAt));
+  const done = await call(app, 'PATCH', `/api/admin/privacy-requests/${id}`, { as: 'op', body: { privacyStatus: 'Изпълнено', response: 'Изпратихме данните.' } });
+  assert.equal(done.status, 200);
+  const own = await call(app, 'GET', '/api/privacy-requests', { as: 'alice' });
+  assert.equal(own.data.requests[0].response, 'Изпратихме данните.');
+  assert.ok(own.data.requests[0].closedAt);
+  assert.equal(own.data.requests[0].handledBy, undefined);
+  assert.ok(store.tables.events.some((e) => e.requestId === id));
+});
+
+test('експорт на данни: само администратор, със запис и без вътрешни бележки', async () => {
+  const { app, store } = setup();
+  const requestId = await withRequest(app);
+  await call(app, 'POST', `/api/admin/requests/${requestId}/messages`, { as: 'op', body: { message: 'ТАЙНА бележка' } });
+  const { id } = store.tables.clients[0];
+  assert.equal((await call(app, 'POST', `/api/admin/clients/${id}/export`, { as: 'plain' })).status, 403);
+  assert.equal((await call(app, 'POST', `/api/admin/clients/${id}/export`, { as: 'alice' })).status, 403);
+  const res = await call(app, 'POST', `/api/admin/clients/${id}/export`, { as: 'op' });
+  assert.equal(res.data.profile.egn, '7501020018');
+  assert.equal(res.data.profile.identity, undefined);
+  assert.equal(res.data.requests.length, 1);
+  assert.ok(!JSON.stringify(res.data).includes('ТАЙНА'));
+  assert.ok(store.tables.events.some((e) => e.action === 'Експорт на всички лични данни'));
+});
+
+// --- Страници за грешки ---
+
+test('браузър към адрес с грешка вижда страница, а заявките на портала получават JSON', async () => {
+  const store = new MemoryStore();
+  store.find = async () => { throw new Error('Graph down'); };
+  const broken = createApp({ env, store });
+  const { app } = setup();
+  const html = (a, path, as) => (async () => {
+    const headers = { accept: 'text/html,application/xhtml+xml' };
+    if (as) headers.cookie = `${SESSION_COOKIE}=${await signToken(users[as], env.SESSION_SECRET, 3600)}`;
+    const res = await a(new Request(`${ORIGIN}${path}`, { headers }));
+    return [res.status, res.headers.get('location')];
+  })();
+  assert.deepEqual(await html(app, '/api/няма'), [302, '/404.html']);
+  assert.deepEqual(await html(app, '/api/requests'), [302, '/']);
+  assert.deepEqual(await html(app, '/api/admin/overview', 'alice'), [302, '/403.html']);
+  assert.deepEqual(await html(broken, '/api/requests', 'alice'), [302, '/500.html']);
+  const asJson = await call(app, 'GET', '/api/няма');
+  assert.equal(asJson.status, 404);
+  assert.ok(asJson.data.error.message);
+});
+
 // --- Имейли ---
 
 function mailSetup() {
   const store = new MemoryStore({
     operators: [{ id: 'op@bulmail.eu', fullName: 'Оп', isActive: 'Да', role: 'Администратор', sessionVersion: '0' }],
   });
-  const mailEnv = { ...env, MAIL_ENABLED: 'true', MAIL_ACCOUNTS: 'accounts@portal.test', MAIL_NOREPLY: 'no-reply@portal.test' };
+  const mailEnv = { ...env, MAIL_ENABLED: 'true', MAIL_ACCOUNTS: 'accounts@portal.test', MAIL_NOREPLY: 'no-reply@portal.test', MAIL_DPO: 'dpo@portal.test' };
   return { store, app: createApp({ env: mailEnv, store }) };
 }
 const linkIn = (mail) => mail.text.match(/https:\S+#t=\S+/)[0];
@@ -676,6 +872,22 @@ test('известия: статус и съобщение до клиента, 
     assert.equal(mail.to, 'alice@example.com');
     assert.ok(!mail.text.includes('ЛИЧЕН') && !mail.text.includes('7501020018'));
   }
+});
+
+test('имейли: искане за лични данни известява DPO без описанието и потвърждава на клиента', async () => {
+  const { app, store } = mailSetup();
+  await call(app, 'POST', '/api/register', { as: 'alice', body: individual });
+  store.sentMail.length = 0;
+  await call(app, 'POST', '/api/privacy-requests', { as: 'alice', body: { rightType: RIGHT, details: 'ЛИЧЕН текст' } });
+  assert.deepEqual(store.sentMail.map((m) => m.to), ['dpo@portal.test', 'alice@example.com']);
+  assert.ok(!store.sentMail[0].text.includes('ЛИЧЕН'));
+  store.sentMail.length = 0;
+  await call(app, 'PATCH', '/api/profile', { as: 'alice', body: editBody({ phone: '0888000111' }) });
+  const { id } = store.tables.changes[0];
+  await call(app, 'POST', `/api/admin/changes/${id}`, { as: 'op', body: { decision: 'approve' } });
+  assert.equal(store.sentMail.at(-1).to, 'alice@example.com');
+  assert.ok(store.sentMail.at(-1).subject.includes('одобрена'));
+  assert.ok(!store.sentMail.at(-1).text.includes('0888000111'));
 });
 
 test('имейлите са изключени: няма изпращане и няма изискване за потвърждение', async () => {

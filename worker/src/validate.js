@@ -74,12 +74,13 @@ export function validateContact(body) {
   return { fields, errors };
 }
 
-// egnOptional е за редакция от оператор: празно поле означава „без промяна“.
-export function validateRegistration(body, { egnOptional = false } = {}) {
+// ЕГН/ЛНЧ тук е по желание: задължително е само за услугите с requiresIdentity в каталога.
+export function validateRegistration(body) {
   const { fields: contact, errors } = validateContact(body);
   const fields = {
     ...contact, firstName: '', middleName: '', lastName: '', egn: '',
     companyName: '', eik: '', vatNumber: '', representative: '',
+    representativeRole: '', representativeEgn: '', correspondenceAddress: '', contactPerson: '',
   };
 
   if (body.kind === 'individual') {
@@ -91,9 +92,7 @@ export function validateRegistration(body, { egnOptional = false } = {}) {
     if (fields.middleName && !PERSON_NAME.test(fields.middleName)) errors.middleName = 'Презимето съдържа невалидни знаци.';
     if (!PERSON_NAME.test(fields.lastName)) errors.lastName = 'Въведете фамилия.';
     fields.egn = clean(body.egn, 10);
-    if (fields.egn ? !isValidEgnOrLnch(fields.egn) : !egnOptional) {
-      errors.egn = 'Въведете валидно ЕГН или ЛНЧ от 10 цифри.';
-    }
+    if (fields.egn && !isValidEgnOrLnch(fields.egn)) errors.egn = 'Въведете валидно ЕГН или ЛНЧ от 10 цифри.';
   } else if (body.kind === 'company') {
     fields.personType = PERSON_TYPES.company;
     fields.companyName = clean(body.companyName, 200);
@@ -104,6 +103,13 @@ export function validateRegistration(body, { egnOptional = false } = {}) {
     if (!isValidEik(fields.eik)) errors.eik = 'Този ЕИК/БУЛСТАТ не е валиден. Проверете цифрите.';
     if (fields.vatNumber && !/^BG\d{9,10}$/.test(fields.vatNumber)) errors.vatNumber = 'ДДС номерът е във формат BG123456789.';
     if (!PERSON_NAME.test(fields.representative)) errors.representative = 'Въведете името на представляващия.';
+    fields.representativeRole = clean(body.representativeRole, 100);
+    fields.representativeEgn = clean(body.representativeEgn, 10);
+    fields.correspondenceAddress = clean(body.correspondenceAddress, 200);
+    fields.contactPerson = clean(body.contactPerson, 160);
+    if (fields.representativeEgn && !isValidEgnOrLnch(fields.representativeEgn)) {
+      errors.representativeEgn = 'Въведете валидно ЕГН или ЛНЧ от 10 цифри.';
+    }
   } else {
     errors.kind = 'Изберете физическо или юридическо лице.';
   }

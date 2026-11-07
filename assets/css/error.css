@@ -1,0 +1,60 @@
+/* Страници за грешки. Следват 404 страницата на www.buladmin.eu. */
+@font-face { font-family: "Onest"; src: url("/assets/fonts/onest-cyrillic-wght.woff2") format("woff2"); font-weight: 100 900; font-display: swap; unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+@font-face { font-family: "Onest"; src: url("/assets/fonts/onest-latin-wght.woff2") format("woff2"); font-weight: 100 900; font-display: swap; unicode-range: U+0000-00FF, U+2000-206F; }
+:root { color-scheme: dark; --navy: #10294c; --navy-2: #1b3a66; --gold-soft: #e0b65e; --soft: rgb(255 255 255 / .78); --line: rgb(255 255 255 / .18); --ease: cubic-bezier(.2, .7, .2, 1); }
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; min-height: 100vh; min-height: 100svh; display: flex; flex-direction: column;
+  background: radial-gradient(90% 70% at 50% 34%, var(--navy-2), var(--navy) 72%) var(--navy);
+  color: #fff; font: 400 1.0625rem/1.6 "Onest", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased; overflow-x: hidden;
+}
+a { color: inherit; }
+a:focus-visible { outline: 3px solid var(--gold-soft); outline-offset: 3px; border-radius: 4px; }
+.wrap { width: min(100%, 1100px); margin-inline: auto; padding-inline: clamp(16px, 4vw, 48px); }
+
+.top { padding-block: 16px; }
+.brand { display: inline-flex; align-items: center; gap: 12px; min-height: 44px; text-decoration: none; }
+.brand__tile { display: grid; place-items: center; width: 48px; height: 48px; background: #fff; border-radius: 10px; }
+.brand__tile img { display: block; width: auto; height: 38px; }
+.brand__word { font-weight: 600; font-size: 1.25rem; letter-spacing: .07em; }
+.brand__word b { font-weight: 600; color: var(--gold-soft); }
+
+main { flex: 1; display: flex; align-items: center; padding-block: clamp(16px, 4vh, 48px) clamp(32px, 6vh, 64px); }
+.content { display: flex; flex-direction: column; align-items: center; text-align: center; }
+
+.code {
+  display: flex; align-items: center; justify-content: center; gap: clamp(0px, 1vw, 12px);
+  font-size: clamp(7.5rem, 31vw, 15rem); font-weight: 700; line-height: 1; letter-spacing: -.04em;
+  animation: rise .8s var(--ease) both;
+}
+.code__zero { display: block; flex: none; width: .92em; height: .92em; margin-inline: -.02em; overflow: visible; }
+.arc { transform-origin: 300px 300px; animation: sweep 1.2s var(--ease) .1s both; }
+.arc--white { animation-delay: .22s; }
+.doc { animation: rise .8s var(--ease) .25s both; }
+
+h1 { margin: clamp(12px, 2vh, 24px) 0 0; font-size: clamp(1.9rem, 1.3rem + 2.6vw, 3.2rem); font-weight: 700; line-height: 1.1; letter-spacing: -.028em; text-wrap: balance; animation: rise .8s var(--ease) .08s both; }
+.lead { max-width: 34em; margin: 16px 0 0; font-size: clamp(1.05rem, 1rem + .3vw, 1.2rem); line-height: 1.5; color: var(--soft); animation: rise .8s var(--ease) .14s both; }
+
+.actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 30px; animation: rise .8s var(--ease) .2s both; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 52px; padding: 12px 26px;
+  border: 1.5px solid var(--gold-soft); border-radius: 6px; background: var(--gold-soft); color: var(--navy);
+  font-weight: 600; text-decoration: none; transition: background .2s, border-color .2s, color .2s, transform .2s var(--ease);
+}
+.btn:hover { background: #ecc875; border-color: #ecc875; transform: translateY(-2px); }
+.btn--ghost { background: transparent; border-color: rgb(255 255 255 / .55); color: #fff; }
+.btn--ghost:hover { background: #fff; border-color: #fff; color: var(--navy); }
+
+.links { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 clamp(14px, 3vw, 28px); margin: 22px 0 0; padding: 0; list-style: none; animation: rise .8s var(--ease) .26s both; }
+.links a { display: inline-flex; align-items: center; min-height: 44px; font-weight: 500; text-decoration: underline; text-decoration-color: var(--gold-soft); text-decoration-thickness: 2px; text-underline-offset: 5px; }
+.links a:hover { color: var(--gold-soft); }
+
+footer { padding-block: 16px 20px; border-top: 1px solid var(--line); font-size: .92rem; color: var(--soft); text-align: center; }
+footer a { display: inline-flex; align-items: center; min-height: 44px; color: #fff; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes sweep { from { opacity: 0; transform: rotate(-22deg) scale(.94); } to { opacity: 1; transform: none; } }
+@media (max-width: 420px) { .actions { width: 100%; } .btn { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

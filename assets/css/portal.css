@@ -180,6 +180,15 @@ fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
 .pill[data-status="Получена"] { background: #eaf5ef; color: var(--ok); border-color: #b6d9c6; }
 .pill[data-status="Отказана"] { background: #fbeeed; color: var(--error); border-color: #e7bdb9; }
 
+.pill[data-privacy="Подадено"] { background: var(--navy); color: #fff; }
+.pill[data-privacy="В обработка"] { background: #e6edf7; color: var(--navy-2); border-color: #bfd0e6; }
+.pill[data-privacy="Удължен срок"] { background: #fbf0d6; color: #6e4c0b; border-color: var(--gold-soft); }
+.pill[data-privacy="Изпълнено"] { background: #eaf5ef; color: var(--ok); border-color: #b6d9c6; }
+.pill[data-privacy="Отказано"] { background: #fbeeed; color: var(--error); border-color: #e7bdb9; }
+.text-error { color: var(--error); font-weight: 600; }
+.card select { min-height: 38px; padding: 6px 10px; border: 1px solid #a9a597; border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }
+.card > .field > textarea { width: 100%; min-height: 80px; padding: 9px 12px; border: 1px solid #a9a597; border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; resize: vertical; }
+
 .tracker { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
 .tracker li { padding-top: 8px; border-top: 4px solid var(--line); font-size: .8rem; color: var(--ink-2); }
 .tracker li.is-done { border-color: var(--gold); color: var(--ink); }

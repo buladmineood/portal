@@ -17,6 +17,10 @@
       { "name": "eik", "label": "ЕИК/БУЛСТАТ", "kind": "text", "indexed": true },
       { "name": "vatNumber", "label": "ДДС номер", "kind": "text" },
       { "name": "representative", "label": "Представляващ", "kind": "text" },
+      { "name": "representativeRole", "label": "Длъжност на представляващия", "kind": "text" },
+      { "name": "representativeEgn", "label": "ЕГН/ЛНЧ на представляващия", "kind": "text" },
+      { "name": "correspondenceAddress", "label": "Адрес за кореспонденция", "kind": "text" },
+      { "name": "contactPerson", "label": "Лице за контакт", "kind": "text" },
       { "name": "phone", "label": "Телефон", "kind": "text" },
       { "name": "contactEmail", "label": "Имейл за контакт", "kind": "text" },
       { "name": "city", "label": "Град", "kind": "text" },
@@ -72,6 +76,38 @@
       { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
       { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
       { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true }
+    ]
+  },
+  "changes": {
+    "title": "Портал - Промени за одобрение",
+    "titleLabel": "ID промяна",
+    "columns": [
+      { "name": "createdAt", "label": "Подадена", "kind": "date" },
+      { "name": "clientId", "label": "ID клиент", "kind": "text", "indexed": true },
+      { "name": "clientName", "label": "Клиент", "kind": "text" },
+      { "name": "changedFields", "label": "Променени полета", "kind": "multiline" },
+      { "name": "proposedValues", "label": "Предложени стойности", "kind": "multiline" },
+      { "name": "changeStatus", "label": "Статус", "kind": "choice", "choices": ["Чака", "Одобрена", "Отказана"], "indexed": true },
+      { "name": "decidedBy", "label": "Решил", "kind": "text" },
+      { "name": "decidedAt", "label": "Решена на", "kind": "date" },
+      { "name": "reason", "label": "Причина", "kind": "multiline" }
+    ]
+  },
+  "privacy": {
+    "title": "Портал - Искания за лични данни",
+    "titleLabel": "Номер на искане",
+    "columns": [
+      { "name": "createdAt", "label": "Подадено", "kind": "date" },
+      { "name": "dueAt", "label": "Срок", "kind": "date" },
+      { "name": "clientId", "label": "ID клиент", "kind": "text", "indexed": true },
+      { "name": "clientName", "label": "Субект на данни", "kind": "text" },
+      { "name": "contactEmail", "label": "Имейл", "kind": "text" },
+      { "name": "rightType", "label": "Право", "kind": "text" },
+      { "name": "details", "label": "Описание", "kind": "multiline" },
+      { "name": "privacyStatus", "label": "Статус", "kind": "choice", "choices": ["Подадено", "В обработка", "Удължен срок", "Изпълнено", "Отказано"], "indexed": true },
+      { "name": "response", "label": "Отговор", "kind": "multiline" },
+      { "name": "handledBy", "label": "Обработил", "kind": "text" },
+      { "name": "closedAt", "label": "Приключено на", "kind": "date" }
     ]
   },
   "accounts": {
