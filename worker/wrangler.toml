@@ -1,0 +1,13 @@
+name = "buladmin-portal-api"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = false
+routes = [{ pattern = "portal.buladmin.eu/api/*", zone_name = "buladmin.eu" }]
+
+# Тайните НЕ са тук. Задават се с `npx wrangler secret put <ИМЕ>`; виж docs/SETUP.md.
+[vars]
+PORTAL_ORIGIN = "https://portal.buladmin.eu"
+SP_HOSTNAME = "bulmaileu.sharepoint.com"
+SP_SITE_PATH = "/sites/buladmin"
+GRAPH_TENANT_ID = "16d24843-7704-4206-87f4-bc20073547ac"
+OPERATOR_TENANT_ID = "16d24843-7704-4206-87f4-bc20073547ac"

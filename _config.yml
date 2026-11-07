@@ -1,0 +1,5 @@
+# GitHub Pages публикува само страниците на портала, не и кода на сървъра.
+exclude:
+  - worker
+  - docs
+  - README.md

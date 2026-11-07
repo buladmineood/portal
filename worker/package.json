@@ -1,0 +1,11 @@
+{
+  "name": "buladmin-portal-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/",
+    "dev": "node dev/server.mjs",
+    "provision": "node scripts/provision.mjs",
+    "deploy": "npx wrangler@4 deploy"
+  }
+}

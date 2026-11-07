@@ -1,0 +1,66 @@
+{
+  "clients": {
+    "title": "Портал - Клиенти",
+    "titleLabel": "ID клиент",
+    "columns": [
+      { "name": "createdAt", "label": "Създаден", "kind": "date" },
+      { "name": "updatedAt", "label": "Обновен", "kind": "date" },
+      { "name": "identity", "label": "Идентичност при вход", "kind": "text", "indexed": true },
+      { "name": "provider", "label": "Вход чрез", "kind": "choice", "choices": ["google", "microsoft"] },
+      { "name": "loginEmail", "label": "Имейл за вход", "kind": "text" },
+      { "name": "personType", "label": "Вид лице", "kind": "choice", "choices": ["Физическо лице", "Юридическо лице"], "indexed": true },
+      { "name": "firstName", "label": "Име", "kind": "text" },
+      { "name": "middleName", "label": "Презиме", "kind": "text" },
+      { "name": "lastName", "label": "Фамилия", "kind": "text" },
+      { "name": "companyName", "label": "Наименование на фирмата", "kind": "text" },
+      { "name": "eik", "label": "ЕИК/БУЛСТАТ", "kind": "text", "indexed": true },
+      { "name": "vatNumber", "label": "ДДС номер", "kind": "text" },
+      { "name": "representative", "label": "Представляващ", "kind": "text" },
+      { "name": "phone", "label": "Телефон", "kind": "text" },
+      { "name": "contactEmail", "label": "Имейл за контакт", "kind": "text" },
+      { "name": "city", "label": "Град", "kind": "text" },
+      { "name": "address", "label": "Адрес", "kind": "text" },
+      { "name": "consentAt", "label": "Съгласие на", "kind": "date" },
+      { "name": "consentVersion", "label": "Версия на политиката", "kind": "text" }
+    ]
+  },
+  "requests": {
+    "title": "Портал - Заявки",
+    "titleLabel": "Номер на заявка",
+    "columns": [
+      { "name": "createdAt", "label": "Създадена", "kind": "date" },
+      { "name": "updatedAt", "label": "Обновена", "kind": "date" },
+      { "name": "clientId", "label": "ID клиент", "kind": "text", "indexed": true },
+      { "name": "clientName", "label": "Клиент", "kind": "text" },
+      { "name": "personType", "label": "Вид лице", "kind": "choice", "choices": ["Физическо лице", "Юридическо лице"] },
+      { "name": "serviceCategory", "label": "Категория", "kind": "text" },
+      { "name": "service", "label": "Услуга", "kind": "text" },
+      { "name": "details", "label": "Описание", "kind": "multiline" },
+      { "name": "requestStatus", "label": "Статус", "kind": "choice", "choices": ["Нова", "Уточняване", "Подготвена", "Подадена", "Проследява се", "Получена", "Отказана"], "indexed": true },
+      { "name": "assignedTo", "label": "Отговорен оператор", "kind": "text", "indexed": true }
+    ]
+  },
+  "events": {
+    "title": "Портал - История",
+    "titleLabel": "ID събитие",
+    "columns": [
+      { "name": "requestId", "label": "Номер на заявка", "kind": "text", "indexed": true },
+      { "name": "occurredAt", "label": "Кога", "kind": "date" },
+      { "name": "actorType", "label": "Извършител", "kind": "choice", "choices": ["Клиент", "Оператор", "Система"] },
+      { "name": "actorName", "label": "Име", "kind": "text" },
+      { "name": "action", "label": "Действие", "kind": "text" },
+      { "name": "fromStatus", "label": "От статус", "kind": "text" },
+      { "name": "toStatus", "label": "Към статус", "kind": "text" },
+      { "name": "message", "label": "Съобщение", "kind": "multiline" },
+      { "name": "visibility", "label": "Видимост", "kind": "choice", "choices": ["Клиент", "Вътрешно"] }
+    ]
+  },
+  "operators": {
+    "title": "Портал - Оператори",
+    "titleLabel": "Служебен имейл",
+    "columns": [
+      { "name": "fullName", "label": "Име", "kind": "text" },
+      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] }
+    ]
+  }
+}
