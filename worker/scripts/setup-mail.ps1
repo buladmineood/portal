@@ -22,7 +22,8 @@ if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
   Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force
 }
 Import-Module ExchangeOnlineManagement
-Connect-ExchangeOnline -ShowBanner:$false
+# -DisableWAM signs in through the browser, so this also works without a console window.
+Connect-ExchangeOnline -ShowBanner:$false -DisableWAM
 
 foreach ($mailbox in $Mailboxes) {
   $existing = Get-Mailbox -Identity $mailbox.Address -ErrorAction SilentlyContinue
@@ -50,7 +51,7 @@ if (-not $assignment) {
 # InScope must be True for the two portal mailboxes and False for your own mailbox.
 Write-Host ''
 $me = (Get-ConnectionInformation | Select-Object -First 1).UserPrincipalName
-foreach ($resource in @($Mailboxes.Address + $me)) {
+foreach ($resource in @(($Mailboxes | ForEach-Object { $_.Address }) + $me)) {
   $result = Test-ServicePrincipalAuthorization -Identity $ObjectId -Resource $resource |
     Where-Object { $_.RoleName -eq 'Application Mail.Send' }
   Write-Host "$resource InScope=$($result.InScope)"
