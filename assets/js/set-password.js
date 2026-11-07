@@ -22,7 +22,9 @@ history.replaceState(null, '', location.pathname);
 
 if (!token) {
   form.hidden = true;
-  showError(alert.parentElement.insertBefore(document.createElement('div'), form), 'Липсва линк за задаване на парола. Отворете целия линк, който получихте, в нов раздел.');
+  const box = document.createElement('div');
+  form.before(box);
+  showError(box, 'Липсва линк за задаване на парола. Отворете целия линк, който получихте, в нов раздел.');
 }
 
 form.addEventListener('submit', async (event) => {

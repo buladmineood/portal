@@ -12,19 +12,27 @@ import { MemoryStore } from '../src/store.js';
 const PORT = 8788;
 const ORIGIN = `http://localhost:${PORT}`;
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const env = { PORTAL_ORIGIN: ORIGIN, SESSION_SECRET: 'dev-only', PASSWORD_PEPPER: 'dev-only' };
+// DEV_MAIL=1 включва имейлите: те не се изпращат, а се виждат на /dev/mail.
+const env = {
+  PORTAL_ORIGIN: ORIGIN,
+  SESSION_SECRET: 'dev-only',
+  PASSWORD_PEPPER: 'dev-only',
+  MAIL_ENABLED: process.env.DEV_MAIL ? 'true' : 'false',
+  MAIL_ACCOUNTS: 'accounts@portal.buladmin.eu',
+  MAIL_NOREPLY: 'no-reply@portal.buladmin.eu',
+};
 const DEV_SETUP_TOKEN = 'o.dev-setup';
 
 const at = (daysAgo) => new Date(Date.now() - daysAgo * 864e5).toISOString().replace(/\.\d+Z$/, 'Z');
 const seedClient = {
   id: 'C-demo-1', createdAt: at(9), updatedAt: at(9), identity: 'google:client', provider: 'google',
-  loginEmail: 'maria@example.com', personType: 'Физическо лице', firstName: 'Мария', middleName: '', lastName: 'Петрова',
+  loginEmail: 'maria@example.com', personType: 'Физическо лице', firstName: 'Мария', middleName: '', lastName: 'Петрова', egn: '7501020018',
   companyName: '', eik: '', vatNumber: '', representative: '', phone: '+359 888 123 456', contactEmail: 'maria@example.com',
   city: 'София', address: 'ул. Примерна 1', consentAt: at(9), consentVersion: '2026-11-07',
 };
 const seedCompany = {
   ...seedClient, id: 'C-demo-2', identity: 'google:company', loginEmail: 'office@example.com', personType: 'Юридическо лице',
-  firstName: '', lastName: '', companyName: 'Пример ЕООД', eik: '123456786', vatNumber: 'BG123456786',
+  firstName: '', lastName: '', egn: '', companyName: 'Пример ЕООД', eik: '123456786', vatNumber: 'BG123456786',
   representative: 'Иван Иванов', contactEmail: 'office@example.com', city: 'Варна', address: 'бул. Примерен 2',
 };
 const req = (id, client, serviceCategory, service, details, requestStatus, assignedTo, days) => ({
@@ -75,6 +83,10 @@ createServer(async (req_, res) => {
     // Двата бутона на началната страница влизат като нов клиент.
     url.pathname = '/dev/login';
     url.searchParams.set('as', 'fresh');
+  }
+  if (url.pathname === '/dev/mail') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(store.sentMail, null, 2));
   }
   if (url.pathname === '/dev/login') {
     const as = url.searchParams.get('as');

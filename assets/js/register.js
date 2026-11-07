@@ -12,7 +12,8 @@ async function init() {
   const individual = h('div', { class: 'form__grid', 'data-kind': 'individual' },
     field({ name: 'firstName', label: 'Име', value: me.identity.firstName, autocomplete: 'given-name', maxlength: 80 }),
     field({ name: 'middleName', label: 'Презиме', hint: 'по желание', autocomplete: 'additional-name', maxlength: 80 }),
-    field({ name: 'lastName', label: 'Фамилия', value: me.identity.lastName, autocomplete: 'family-name', maxlength: 80, wrapClass: 'full' }));
+    field({ name: 'lastName', label: 'Фамилия', value: me.identity.lastName, autocomplete: 'family-name', maxlength: 80 }),
+    field({ name: 'egn', label: 'ЕГН или ЛНЧ', inputmode: 'numeric', autocomplete: 'off', maxlength: 10, placeholder: '10 цифри' }));
 
   const company = h('div', { class: 'form__grid', 'data-kind': 'company', hidden: true },
     field({ name: 'companyName', label: 'Наименование на фирмата', autocomplete: 'organization', maxlength: 200, wrapClass: 'full' }),

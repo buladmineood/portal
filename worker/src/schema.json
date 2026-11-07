@@ -12,6 +12,7 @@
       { "name": "firstName", "label": "Име", "kind": "text" },
       { "name": "middleName", "label": "Презиме", "kind": "text" },
       { "name": "lastName", "label": "Фамилия", "kind": "text" },
+      { "name": "egn", "label": "ЕГН/ЛНЧ", "kind": "text" },
       { "name": "companyName", "label": "Наименование на фирмата", "kind": "text" },
       { "name": "eik", "label": "ЕИК/БУЛСТАТ", "kind": "text", "indexed": true },
       { "name": "vatNumber", "label": "ДДС номер", "kind": "text" },
@@ -68,6 +69,7 @@
       { "name": "lockedUntil", "label": "Заключен до", "kind": "text" },
       { "name": "resetTokenHash", "label": "Хеш на еднократен линк", "kind": "text", "indexed": true },
       { "name": "resetExpires", "label": "Линкът изтича", "kind": "text" },
+      { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
       { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
       { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true }
     ]
@@ -84,6 +86,10 @@
       { "name": "lockedUntil", "label": "Заключен до", "kind": "text" },
       { "name": "resetTokenHash", "label": "Хеш на еднократен линк", "kind": "text", "indexed": true },
       { "name": "resetExpires", "label": "Линкът изтича", "kind": "text" },
+      { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
+      { "name": "emailVerifiedAt", "label": "Имейлът е потвърден", "kind": "text" },
+      { "name": "verifyTokenHash", "label": "Хеш на потвърждение", "kind": "text", "indexed": true },
+      { "name": "verifyExpires", "label": "Потвърждението изтича", "kind": "text" },
       { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
       { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true }
     ]

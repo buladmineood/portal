@@ -13,10 +13,30 @@ function page(...children) {
   window.scrollTo(0, 0);
 }
 
+function verificationBanner() {
+  if (!state.me.needsEmailVerification) return null;
+  const result = h('div', { 'aria-live': 'polite' });
+  return h('div', { class: 'alert alert--warn stack' },
+    h('p', {}, `Потвърдете имейла си ${state.me.identity.email} с линка, който Ви изпратихме. Дотогава не можете да подавате заявки.`),
+    h('button', {
+      class: 'btn btn--ghost btn--small', type: 'button',
+      onclick: async () => {
+        try {
+          await api('/auth/resend-verification', { method: 'POST' });
+          result.replaceChildren('Изпратихме нов линк. Проверете и папката за нежелана поща.');
+        } catch (err) {
+          result.replaceChildren(err.message);
+        }
+      },
+    }, 'Изпратете линка отново'),
+    result);
+}
+
 async function viewList() {
   page(h('div', { class: 'loading' }, 'Зареждане…'));
   const { requests } = await api('/requests');
   page(
+    verificationBanner(),
     h('div', { class: 'row row--between' },
       h('h1', {}, 'Моите заявки'),
       h('a', { class: 'btn', href: '#/new' }, 'Нова заявка')),
@@ -56,7 +76,7 @@ function viewNew() {
     h('div', { class: 'field' },
       h('label', { for: 'f-details' }, 'Какво трябва да се свърши?'),
       h('textarea', { id: 'f-details', name: 'details', maxlength: 4000 })),
-    h('p', { class: 'small muted' }, 'Не пишете ЕГН или данни за здраве тук. Ако са нужни за процедурата, ще ги уточним с Вас.'),
+    h('p', { class: 'small muted' }, 'Не пишете ЕГН или данни за здраве в описанието. Ако са нужни за процедурата, ще ги уточним с Вас.'),
     alert,
     h('div', { class: 'row' }, submit, h('a', { class: 'btn btn--ghost', href: '#/' }, 'Отказ')));
 
@@ -150,6 +170,7 @@ function viewProfile() {
       h('dl', { class: 'details' },
         h('dt', {}, 'Вид лице'), h('dd', {}, c.personType),
         h('dt', {}, isCompany ? 'Фирма' : 'Име'), h('dd', {}, isCompany ? c.companyName : [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')),
+        !isCompany && c.egnMasked && [h('dt', {}, 'ЕГН/ЛНЧ'), h('dd', {}, c.egnMasked)],
         isCompany && [h('dt', {}, 'ЕИК/БУЛСТАТ'), h('dd', {}, c.eik)],
         isCompany && c.vatNumber && [h('dt', {}, 'ДДС номер'), h('dd', {}, c.vatNumber)],
         isCompany && [h('dt', {}, 'Представляващ'), h('dd', {}, c.representative)],

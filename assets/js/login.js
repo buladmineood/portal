@@ -1,4 +1,4 @@
-import { api, showError, showFieldErrors } from './core.js';
+import { api, h, showError, showFieldErrors } from './core.js';
 
 const isOperatorPage = document.body.dataset.role === 'operator';
 const form = document.getElementById('login-form');
@@ -17,7 +17,7 @@ function setMode(value) {
   submit.textContent = signup ? 'Създайте профил' : 'Вход';
   form.elements.password.autocomplete = signup ? 'new-password' : 'current-password';
   document.getElementById('password-hint').hidden = !signup;
-  document.getElementById('forgot-note').hidden = signup;
+  document.getElementById('forgot-area').hidden = signup;
   alert.replaceChildren();
   showFieldErrors(form, {});
 }
@@ -46,6 +46,33 @@ form.addEventListener('submit', async (event) => {
     showError(alert, err.message);
     submit.disabled = false;
   }
+});
+
+// Забравена парола: при включени имейли потребителят сам получава линк.
+const forgotNote = document.getElementById('forgot-note');
+const forgotButton = document.getElementById('forgot-button');
+api('/meta').then(({ mailEnabled }) => {
+  if (!mailEnabled) return;
+  if (forgotNote) forgotNote.hidden = true;
+  forgotButton.hidden = false;
+}).catch(() => { /* остава указанието за контакт */ });
+
+forgotButton?.addEventListener('click', async () => {
+  alert.replaceChildren();
+  const email = form.elements.email.value.trim();
+  if (!email) {
+    showFieldErrors(form, { email: 'Въведете имейла си и натиснете отново.' });
+    return;
+  }
+  showFieldErrors(form, {});
+  forgotButton.disabled = true;
+  try {
+    await api('/auth/forgot', { method: 'POST', body: { email, operator: isOperatorPage } });
+    alert.replaceChildren(h('div', { class: 'alert alert--ok', role: 'status' }, 'Ако има профил с този имейл, изпратихме линк за нова парола. Той важи 1 час.'));
+  } catch (err) {
+    showError(alert, err.message);
+  }
+  forgotButton.disabled = false;
 });
 
 // Вече влязъл потребител отива директно на своята страница.

@@ -1,6 +1,15 @@
 import {
-  api, fatal, formatDate, formatTime, formValues, h, linkBox, loginLabel, mount, securityCards, showError, showFieldErrors, statusPill,
+  api, contactFields, fatal, field, formatDate, formatTime, formValues, h, linkBox, loginLabel, mount, securityCards, showError,
+  showFieldErrors, statusPill,
 } from './core.js';
+
+// Показва резултата от изпратен линк: имейл или ръчно предаване, ако имейлът не е излязъл.
+function showDelivery(box, result, note) {
+  box.replaceChildren(result.emailed
+    ? h('div', { class: 'alert alert--ok', role: 'status' }, `Изпратихме имейл с линка до ${result.to}.`)
+    : linkBox(result.link, note));
+  window.scrollTo(0, 0);
+}
 
 let main;
 let meta;
@@ -83,9 +92,126 @@ function viewRequests() {
   renderResults();
 }
 
+async function viewClient(id) {
+  page(h('div', { class: 'loading' }, 'Зареждане…'));
+  const url = `/admin/clients/${encodeURIComponent(id)}`;
+  const detail = await api(url);
+  const c = detail.client;
+  const notice = h('div', { 'aria-live': 'polite' });
+
+  // Пълното ЕГН се зарежда само при изрично действие, което остава в историята.
+  const egnValue = h('span', {}, c.egnMasked);
+  const reveal = c.egnMasked && h('button', {
+    class: 'link-btn small', type: 'button',
+    onclick: async () => {
+      try {
+        const { egn } = await api(`${url}/egn`, { method: 'POST' });
+        egnValue.textContent = egn;
+        reveal.remove();
+      } catch (err) {
+        showError(notice, err.message);
+      }
+    },
+  }, 'Покажи');
+
+  const individual = h('div', { class: 'form__grid' },
+    field({ name: 'firstName', label: 'Име', value: c.firstName, maxlength: 80 }),
+    field({ name: 'middleName', label: 'Презиме', value: c.middleName, maxlength: 80 }),
+    field({ name: 'lastName', label: 'Фамилия', value: c.lastName, maxlength: 80 }),
+    field({
+      name: 'egn', label: 'ЕГН или ЛНЧ', hint: c.egnMasked ? 'празно: без промяна' : '', inputmode: 'numeric',
+      autocomplete: 'off', maxlength: 10, placeholder: c.egnMasked,
+    }));
+  const company = h('div', { class: 'form__grid' },
+    field({ name: 'companyName', label: 'Наименование на фирмата', value: c.companyName, maxlength: 200, wrapClass: 'full' }),
+    field({ name: 'eik', label: 'ЕИК/БУЛСТАТ', value: c.eik, inputmode: 'numeric', maxlength: 13 }),
+    field({ name: 'vatNumber', label: 'ДДС номер', value: c.vatNumber, maxlength: 12 }),
+    field({ name: 'representative', label: 'Представляващ', value: c.representative, maxlength: 160, wrapClass: 'full' }));
+  const groups = { individual, company };
+  const applyKind = (kind) => {
+    for (const [key, group] of Object.entries(groups)) {
+      group.hidden = key !== kind;
+      group.querySelectorAll('input').forEach((input) => { input.disabled = key !== kind; });
+    }
+  };
+  const isCompany = !!c.companyName;
+  const kindOption = (value, label, checked) => h('label', {},
+    h('input', { type: 'radio', name: 'kind', value, checked, onchange: () => applyKind(value) }), h('b', {}, label));
+
+  const formAlert = h('div', { 'aria-live': 'polite' });
+  const save = h('button', { class: 'btn', type: 'submit' }, 'Запазете');
+  const form = h('form', { class: 'form', novalidate: true },
+    h('fieldset', { class: 'field' },
+      h('legend', {}, 'Вид лице'),
+      h('div', { class: 'kind' },
+        kindOption('individual', 'Физическо лице', !isCompany),
+        kindOption('company', 'Юридическо лице', isCompany))),
+    individual,
+    company,
+    h('div', { class: 'form__grid' }, contactFields(c)),
+    formAlert,
+    h('div', {}, save));
+  applyKind(isCompany ? 'company' : 'individual');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    formAlert.replaceChildren();
+    save.disabled = true;
+    try {
+      await api(url, { method: 'PATCH', body: formValues(form) });
+      await viewClient(id);
+      window.scrollTo(0, 0);
+    } catch (err) {
+      showFieldErrors(form, err.fields);
+      showError(formAlert, err.message);
+      save.disabled = false;
+    }
+  });
+
+  const resetLink = c.provider === 'local' && h('button', {
+    class: 'btn btn--ghost btn--small', type: 'button',
+    onclick: async () => {
+      try {
+        const result = await api(`${url}/reset`, { method: 'POST' });
+        showDelivery(notice, result, `Линк за нова парола за ${c.loginEmail}. Първо проверете самоличността на клиента.`);
+      } catch (err) {
+        showError(notice, err.message);
+      }
+    },
+  }, 'Изпратете линк за нова парола');
+
+  page(
+    h('a', { class: 'back', href: '#/clients' }, '← Всички клиенти'),
+    notice,
+    h('div', { class: 'split' },
+      h('div', { class: 'stack' },
+        h('h1', {}, c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')),
+        h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Редакция на данните'), form),
+        h('h2', {}, 'История на промените'),
+        detail.events.length
+          ? h('ol', { class: 'timeline' }, detail.events.map((e) => h('li', { class: 'is-internal' },
+              h('div', { class: 'timeline__head' }, h('span', {}, `${e.actorName} · ${e.action}`), h('time', { datetime: e.occurredAt }, formatTime(e.occurredAt))))))
+          : h('div', { class: 'empty' }, 'Няма записани промени.')),
+      h('aside', { class: 'stack' },
+        c.egnMasked && h('div', { class: 'card' },
+          h('h2', { style: 'margin-bottom:8px' }, 'ЕГН/ЛНЧ'),
+          h('p', { class: 'row' }, egnValue, reveal),
+          h('p', { class: 'small muted', style: 'margin-top:8px' }, 'Всеки преглед на пълното ЕГН се записва в историята.')),
+        h('div', { class: 'card stack' },
+          h('h2', {}, 'Вход'),
+          h('p', {}, loginLabel(c)),
+          resetLink),
+        h('div', { class: 'card stack' },
+          h('h2', {}, 'Заявки'),
+          detail.requests.length
+            ? h('div', { class: 'req-list' }, detail.requests.map((r) => h('a', { class: 'req-item', href: `#/r/${r.id}` },
+                h('div', { class: 'req-item__top' }, h('span', { class: 'req-item__title' }, r.service), statusPill(r.requestStatus)),
+                h('div', { class: 'req-item__meta' }, `№ ${r.id} · ${formatDate(r.createdAt)}`))))
+            : h('p', { class: 'muted' }, 'Няма заявки.')))),
+  );
+}
+
 function viewClients() {
   const results = h('div', {});
-  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
   let query = '';
   const render = () => {
     const q = norm(query);
@@ -96,32 +222,20 @@ function viewClients() {
       ? h('div', { class: 'table-wrap' }, h('table', {},
           h('thead', {}, h('tr', {}, ['Клиент', 'Вид', 'ЕИК', 'Контакт', 'Заявки', 'Регистриран', 'Вход'].map((t) => h('th', { scope: 'col' }, t)))),
           h('tbody', {}, rows.map((c) => h('tr', {},
-            h('td', {}, h('strong', {}, c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')), h('div', { class: 'small muted' }, c.city)),
+            h('td', {}, h('a', { href: `#/c/${c.id}` }, c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')), h('div', { class: 'small muted' }, c.city)),
             h('td', { 'data-label': 'Вид' }, c.personType),
             h('td', { 'data-label': 'ЕИК' }, c.eik || '–'),
             h('td', { 'data-label': 'Контакт' }, c.phone, h('div', { class: 'small' }, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail))),
             h('td', { 'data-label': 'Заявки' }, String(counts[c.id] || 0)),
             h('td', { 'data-label': 'Регистриран' }, formatDate(c.createdAt)),
-            h('td', { 'data-label': 'Вход' }, loginLabel(c),
-              c.provider === 'local' && h('div', {}, h('button', {
-                class: 'link-btn small', type: 'button',
-                onclick: async () => {
-                  try {
-                    const { link } = await api(`/admin/clients/${encodeURIComponent(c.id)}/reset`, { method: 'POST' });
-                    notice.replaceChildren(linkBox(link, `Линк за нова парола за ${c.loginEmail}. Първо проверете самоличността на клиента.`));
-                  } catch (err) {
-                    showError(notice, err.message);
-                  }
-                  window.scrollTo(0, 0);
-                },
-              }, 'Линк за нова парола'))))))))
+            h('td', { 'data-label': 'Вход' }, loginLabel(c)))))))
       : h('div', { class: 'empty' }, data.clients.length ? 'Няма клиенти по това търсене.' : 'Още няма регистрирани клиенти.'));
   };
   const search = h('input', {
     type: 'search', placeholder: 'Търсене по име, ЕИК, телефон, имейл…', 'aria-label': 'Търсене',
     oninput: () => { query = search.value; render(); },
   });
-  page(tabs('clients'), notice, h('div', { class: 'filters', style: 'grid-template-columns:minmax(0,1fr)' }, search), results);
+  page(tabs('clients'), h('div', { class: 'filters', style: 'grid-template-columns:minmax(0,1fr)' }, search), results);
   render();
 }
 
@@ -164,9 +278,8 @@ function viewOperators() {
           h('td', { 'data-label': 'Свързан с' }, linked || '–'),
           h('td', {}, isMe ? h('span', { class: 'muted small' }, 'Това сте Вие') : h('div', { class: 'row' },
             act('Линк за парола', async () => {
-              const { link } = await api(`${url}/reset`, { method: 'POST' });
-              notice.replaceChildren(linkBox(link, `Линк за задаване на парола за ${o.email}.`));
-              window.scrollTo(0, 0);
+              const result = await api(`${url}/reset`, { method: 'POST' });
+              showDelivery(notice, result, `Линк за задаване на парола за ${o.email}.`);
             }),
             act(o.isActive === 'Да' ? 'Деактивирайте' : 'Активирайте', async () => {
               await api(url, { method: 'PATCH', body: { isActive: o.isActive === 'Да' ? 'Не' : 'Да' } });
@@ -189,12 +302,11 @@ function viewOperators() {
     submit.disabled = true;
     try {
       const values = formValues(form);
-      const { link } = await api('/admin/operators', { method: 'POST', body: values });
+      const result = await api('/admin/operators', { method: 'POST', body: values });
       showFieldErrors(form, {});
       form.reset();
       await refresh();
-      notice.replaceChildren(linkBox(link, `Покана за ${values.email}. С този линк операторът си задава парола.`));
-      window.scrollTo(0, 0);
+      showDelivery(notice, result, `Покана за ${values.email}. С този линк операторът си задава парола.`);
     } catch (err) {
       showFieldErrors(form, err.fields);
       showError(notice, err.message);
@@ -213,7 +325,8 @@ function clientCard(c) {
   const isCompany = !!c.companyName;
   return h('dl', { class: 'details' },
     h('dt', {}, 'Вид'), h('dd', {}, c.personType),
-    h('dt', {}, isCompany ? 'Фирма' : 'Име'), h('dd', {}, isCompany ? c.companyName : [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')),
+    h('dt', {}, isCompany ? 'Фирма' : 'Име'), h('dd', {}, h('a', { href: `#/c/${c.id}` }, isCompany ? c.companyName : [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' '))),
+    !isCompany && c.egnMasked && [h('dt', {}, 'ЕГН/ЛНЧ'), h('dd', {}, c.egnMasked)],
     isCompany && [h('dt', {}, 'ЕИК'), h('dd', {}, c.eik)],
     isCompany && c.vatNumber && [h('dt', {}, 'ДДС'), h('dd', {}, c.vatNumber)],
     isCompany && [h('dt', {}, 'Представляващ'), h('dd', {}, c.representative)],
@@ -318,9 +431,12 @@ async function viewRequest(id) {
 async function route() {
   const hash = location.hash.replace(/^#/, '') || '/';
   const m = hash.match(/^\/r\/([\w-]+)$/);
+  const clientMatch = hash.match(/^\/c\/([\w-]+)$/);
   try {
     if (m) {
       await viewRequest(m[1]);
+    } else if (clientMatch) {
+      await viewClient(clientMatch[1]);
     } else {
       page(h('div', { class: 'loading' }, 'Зареждане…'));
       data = await api('/admin/overview');

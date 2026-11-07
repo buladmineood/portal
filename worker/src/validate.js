@@ -19,6 +19,35 @@ export function isValidEik(eik) {
   return last === d[12];
 }
 
+function isValidEgn(egn) {
+  const d = [...egn].map(Number);
+  const yy = d[0] * 10 + d[1];
+  const mm = d[2] * 10 + d[3];
+  const dd = d[4] * 10 + d[5];
+  let year;
+  let month;
+  if (mm >= 1 && mm <= 12) { year = 1900 + yy; month = mm; }
+  else if (mm >= 21 && mm <= 32) { year = 1800 + yy; month = mm - 20; }
+  else if (mm >= 41 && mm <= 52) { year = 2000 + yy; month = mm - 40; }
+  else return false;
+  const date = new Date(Date.UTC(year, month - 1, dd));
+  if (date.getUTCMonth() !== month - 1 || date.getUTCDate() !== dd) return false;
+  const sum = [2, 4, 8, 5, 10, 9, 7, 3, 6].reduce((s, w, i) => s + w * d[i], 0);
+  return (sum % 11) % 10 === d[9];
+}
+
+function isValidLnch(lnch) {
+  const d = [...lnch].map(Number);
+  const sum = [21, 19, 17, 13, 11, 9, 7, 3, 1].reduce((s, w, i) => s + w * d[i], 0);
+  return sum % 10 === d[9];
+}
+
+export function isValidEgnOrLnch(value) {
+  return /^\d{10}$/.test(value) && (isValidEgn(value) || isValidLnch(value));
+}
+
+export const maskEgn = (egn) => (egn ? `••••••••${egn.slice(-2)}` : '');
+
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 export const isValidEmail = (email) => EMAIL.test(email);
 export function passwordError(password) {
@@ -45,10 +74,11 @@ export function validateContact(body) {
   return { fields, errors };
 }
 
-export function validateRegistration(body) {
+// egnOptional е за редакция от оператор: празно поле означава „без промяна“.
+export function validateRegistration(body, { egnOptional = false } = {}) {
   const { fields: contact, errors } = validateContact(body);
   const fields = {
-    ...contact, firstName: '', middleName: '', lastName: '',
+    ...contact, firstName: '', middleName: '', lastName: '', egn: '',
     companyName: '', eik: '', vatNumber: '', representative: '',
   };
 
@@ -60,6 +90,10 @@ export function validateRegistration(body) {
     if (!PERSON_NAME.test(fields.firstName)) errors.firstName = 'Въведете име.';
     if (fields.middleName && !PERSON_NAME.test(fields.middleName)) errors.middleName = 'Презимето съдържа невалидни знаци.';
     if (!PERSON_NAME.test(fields.lastName)) errors.lastName = 'Въведете фамилия.';
+    fields.egn = clean(body.egn, 10);
+    if (fields.egn ? !isValidEgnOrLnch(fields.egn) : !egnOptional) {
+      errors.egn = 'Въведете валидно ЕГН или ЛНЧ от 10 цифри.';
+    }
   } else if (body.kind === 'company') {
     fields.personType = PERSON_TYPES.company;
     fields.companyName = clean(body.companyName, 200);

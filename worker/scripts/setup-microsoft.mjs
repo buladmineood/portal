@@ -8,9 +8,9 @@
 //
 //   node scripts/setup-microsoft.mjs --operator ime@bulmail.eu --name "Име Фамилия"
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { CLIENT_ASSERTION_TYPE, clientAssertion } from '../src/crypto.js';
 
 // Публичното приложение на Microsoft за Graph от командния ред; достъпът е този на влезлия администратор.
 const GRAPH_CLI_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e';
@@ -85,8 +85,29 @@ console.log(`Приложение: ${app.displayName}; signInAudience=${app.sign
 const callback = `${tomlVar('PORTAL_ORIGIN')}/api/auth/microsoft/callback`;
 if (!app.web?.redirectUris?.includes(callback)) console.log(`ВНИМАНИЕ: липсва redirect URI ${callback}`);
 
-const thumbprint = createHash('sha1').update(certificate).digest('base64');
-if (app.keyCredentials.some((k) => k.customKeyIdentifier === thumbprint)) {
+// Ако Microsoft приема подписа, сертификатът вече е качен и няма какво да се променя.
+async function certificateAccepted() {
+  const privateKey = readFileSync(here('../.dev.vars'), 'utf8').match(/^MS_CERT_PRIVATE_KEY=(.*)$/m)?.[1]?.trim();
+  if (!privateKey) throw new Error('Липсва MS_CERT_PRIVATE_KEY в .dev.vars');
+  const tokenUrl = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`;
+  const res = await fetch(tokenUrl, {
+    method: 'POST',
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: appId,
+      client_assertion_type: CLIENT_ASSERTION_TYPE,
+      client_assertion: await clientAssertion({
+        MS_CLIENT_ID: appId,
+        MS_CERT_THUMBPRINT: tomlVar('MS_CERT_THUMBPRINT'),
+        MS_CERT_PRIVATE_KEY: privateKey,
+      }, tokenUrl),
+      scope: 'https://graph.microsoft.com/.default',
+    }),
+  });
+  return res.ok;
+}
+
+if (await certificateAccepted()) {
   console.log('1. Сертификатът вече е качен.');
 } else {
   await graph(`/applications/${app.id}`, 'PATCH', {
@@ -100,17 +121,24 @@ if (app.keyCredentials.some((k) => k.customKeyIdentifier === thumbprint)) {
   console.log('1. Сертификатът е качен.');
 }
 
-// 2. Sites.Selected и admin consent
+// 2. Права на приложението и admin consent.
+// Mail.Send нарочно НЕ се добавя тук: в Entra то важи за всички пощенски кутии в tenant-а и правата
+// се събират, така че ограничението в Exchange не би имало ефект. Изпращането се разрешава само за
+// двете кутии на портала през Exchange RBAC със scripts/setup-mail.ps1.
 const graphSp = await graph(`/servicePrincipals(appId='${GRAPH_APP_ID}')?$select=id,appRoles`);
-const role = graphSp.appRoles.find((r) => r.value === 'Sites.Selected');
+const roles = ['Sites.Selected'].map((value) => graphSp.appRoles.find((r) => r.value === value));
 const graphAccess = app.requiredResourceAccess.find((r) => r.resourceAppId === GRAPH_APP_ID);
-if (!graphAccess?.resourceAccess.some((r) => r.id === role.id)) {
+const missingAccess = roles.filter((role) => !graphAccess?.resourceAccess.some((r) => r.id === role.id));
+if (missingAccess.length) {
   await graph(`/applications/${app.id}`, 'PATCH', {
     requiredResourceAccess: [
       ...app.requiredResourceAccess.filter((r) => r.resourceAppId !== GRAPH_APP_ID),
       {
         resourceAppId: GRAPH_APP_ID,
-        resourceAccess: [...(graphAccess?.resourceAccess || []), { id: role.id, type: 'Role' }],
+        resourceAccess: [
+          ...(graphAccess?.resourceAccess || []),
+          ...missingAccess.map((role) => ({ id: role.id, type: 'Role' })),
+        ],
       },
     ],
   });
@@ -122,14 +150,18 @@ try {
   if (err.status !== 404) throw err;
   appSp = await graph('/servicePrincipals', 'POST', { appId });
 }
+// setup-mail.ps1 чете този идентификатор: Exchange изисква ID-то от Enterprise applications.
+writeFileSync(here('../.secrets/service-principal-id.txt'), appSp.id);
 const assignments = (await graph(`/servicePrincipals/${appSp.id}/appRoleAssignments`)).value;
-if (assignments.some((a) => a.appRoleId === role.id && a.resourceId === graphSp.id)) {
-  console.log('2. Sites.Selected вече е одобрено.');
-} else {
-  await graph(`/servicePrincipals/${graphSp.id}/appRoleAssignedTo`, 'POST', {
-    principalId: appSp.id, resourceId: graphSp.id, appRoleId: role.id,
-  });
-  console.log('2. Sites.Selected е добавено и одобрено.');
+for (const role of roles) {
+  if (assignments.some((a) => a.appRoleId === role.id && a.resourceId === graphSp.id)) {
+    console.log(`2. ${role.value} вече е одобрено.`);
+  } else {
+    await graph(`/servicePrincipals/${graphSp.id}/appRoleAssignedTo`, 'POST', {
+      principalId: appSp.id, resourceId: graphSp.id, appRoleId: role.id,
+    });
+    console.log(`2. ${role.value} е добавено и одобрено.`);
+  }
 }
 
 // 3. Достъп само до сайта на портала

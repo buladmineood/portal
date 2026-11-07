@@ -82,6 +82,13 @@ for (const [key, def] of Object.entries(schema)) {
 
   // Колоната Title пази уникалния номер: индексира се, за да може да се търси по нея.
   const { value: columns } = await graph(`/sites/${site.id}/lists/${list.id}/columns?$select=id,name,indexed,displayName`);
+  // Новите колони от schema.json се добавят и към вече създадени таблици.
+  for (const column of def.columns) {
+    if (!columns.some((c) => c.name === column.name)) {
+      await graph(`/sites/${site.id}/lists/${list.id}/columns`, 'POST', columnDefinition(column));
+      console.log(`    нова колона: ${column.label}`);
+    }
+  }
   const title = columns.find((c) => c.name === 'Title');
   if (title && (!title.indexed || title.displayName !== def.titleLabel)) {
     await graph(`/sites/${site.id}/lists/${list.id}/columns/${title.id}`, 'PATCH', { indexed: true, displayName: def.titleLabel });

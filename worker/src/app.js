@@ -3,7 +3,10 @@ import {
   b64url, hashPassword, randomCode, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
 } from './crypto.js';
 import { beginLogin, completeLogin, isProvider } from './oauth.js';
-import { clean, displayName, isValidEmail, passwordError, validateContact, validateRegistration } from './validate.js';
+import schema from './schema.json' with { type: 'json' };
+import {
+  clean, displayName, isValidEmail, maskEgn, passwordError, validateContact, validateRegistration,
+} from './validate.js';
 
 export const SESSION_COOKIE = '__Host-ba_session';
 const FLOW_COOKIE = '__Host-ba_oauth';
@@ -16,6 +19,10 @@ const MAX_MESSAGES_PER_DAY = 30;
 const MAX_FAILED_LOGINS = 5;
 const LOCK_MS = 15 * 60 * 1000;
 const LINK_TTL_MS = 72 * 3600 * 1000;
+const RESET_TTL_MS = 3600 * 1000;
+const VERIFY_TTL_MS = 7 * 24 * 3600 * 1000;
+const MAIL_THROTTLE_MS = 5 * 60 * 1000;
+const CLIENT_LABELS = Object.fromEntries(schema.clients.columns.map((c) => [c.name, c.label]));
 const PROVIDER_COLUMN = { google: 'googleId', microsoft: 'microsoftId' };
 const TOKEN_TABLE = { o: 'operators', c: 'accounts' };
 const ADMIN_ROLE = 'Администратор';
@@ -59,10 +66,11 @@ function readCookie(request, name) {
 const newRequestId = (now) =>
   `BA-${now.toISOString().slice(2, 4)}${now.toISOString().slice(5, 7)}-${randomCode(6)}`;
 
-// Клиентът не вижда вътрешния идентификатор на профила и отговорния служител.
+// Вътрешният идентификатор не излиза навън, а ЕГН се връща само маскирано.
+// Пълното ЕГН се чете само през отделното действие на оператор, което оставя запис.
 function publicClient(c) {
-  const { identity, ...rest } = c;
-  return rest;
+  const { identity, egn, ...rest } = c;
+  return { ...rest, egnMasked: maskEgn(egn) };
 }
 function publicRequest(r) {
   const { assignedTo, ...rest } = r;
@@ -78,6 +86,26 @@ const byOldest = (field) => (a, b) => String(a[field]).localeCompare(String(b[fi
 
 export function createApp({ env, store, fetchImpl = (...args) => fetch(...args), now = () => new Date() }) {
   const nowIso = () => now().toISOString().replace(/\.\d+Z$/, 'Z');
+  const mailEnabled = env.MAIL_ENABLED === 'true';
+
+  // Неуспешен имейл не трябва да проваля действието на потребителя.
+  async function sendMail(from, to, subject, lines) {
+    if (!mailEnabled || !to) return false;
+    try {
+      const text = [...lines, '', 'БУЛАДМИН', env.PORTAL_ORIGIN, '', 'Това съобщение е автоматично. Моля, не отговаряйте на него.'].join('\n');
+      await store.sendMail(from, to, subject, text);
+      return true;
+    } catch (err) {
+      console.error('mail failed', err.message);
+      return false;
+    }
+  }
+
+  const notifyClient = async (clientId, subject, lines) => {
+    const [client] = await store.find('clients', 'id', clientId);
+    return sendMail(env.MAIL_NOREPLY, client?.contactEmail, subject, lines);
+  };
+  const requestUrl = (id) => `${env.PORTAL_ORIGIN}/account.html#/r/${id}`;
 
   // Локалните сесии се сверяват с таблицата при всяка заявка, така че смяна на парола
   // и деактивиране на оператор прекратяват отворените сесии веднага.
@@ -261,6 +289,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       failedLogins: '0',
     };
     await store.create('accounts', account);
+    await sendVerification(account);
     return json({ ok: true }, 201, { 'set-cookie': await sessionCookie(principalSession('accounts', account)) });
   }
 
@@ -293,14 +322,88 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   const hashToken = async (token) => b64url(await sha256(token));
 
   // Еднократен линк за покана или нова парола. В таблицата стои само хешът му.
-  async function issueSetupLink(table, id) {
+  async function issueSetupLink(table, id, ttlMs = LINK_TTL_MS) {
     const prefix = table === 'operators' ? 'o' : 'c';
     const token = `${prefix}.${randomToken()}`;
     await store.update(table, id, {
       resetTokenHash: await hashToken(token),
-      resetExpires: new Date(now().getTime() + LINK_TTL_MS).toISOString(),
+      resetExpires: new Date(now().getTime() + ttlMs).toISOString(),
+      resetSentAt: now().toISOString(),
     });
     return `${env.PORTAL_ORIGIN}/set-password.html#t=${token}`;
+  }
+
+  // --- Потвърждение на имейл и забравена парола ---
+
+  async function sendVerification(account) {
+    if (!mailEnabled) return false;
+    const token = `v.${randomToken()}`;
+    await store.update('accounts', account.id, {
+      verifyTokenHash: await hashToken(token),
+      verifyExpires: new Date(now().getTime() + VERIFY_TTL_MS).toISOString(),
+    });
+    return sendMail(env.MAIL_ACCOUNTS, account.email, 'Потвърдете имейла си за портала на БУЛАДМИН', [
+      'Здравейте,',
+      '',
+      'Потвърдете имейла си с този линк, за да можете да подавате заявки:',
+      `${env.PORTAL_ORIGIN}/verify-email.html#t=${token}`,
+      '',
+      'Линкът важи 7 дни. Ако не сте се регистрирали Вие, не правете нищо.',
+    ]);
+  }
+
+  async function resendVerification(request) {
+    const session = await requireSession(request);
+    const account = session.provider === 'local' ? session.principal : null;
+    if (!account) throw new HttpError(403, 'Този профил няма нужда от потвърждение.');
+    if (account.emailVerifiedAt) return json({ ok: true });
+    const sentAt = Date.parse(account.verifyExpires) - VERIFY_TTL_MS;
+    if (sentAt > now().getTime() - MAIL_THROTTLE_MS) {
+      throw new HttpError(429, 'Вече изпратихме линк. Проверете пощата си и папката за нежелана поща или опитайте след 5 минути.');
+    }
+    await sendVerification(account);
+    return json({ ok: true });
+  }
+
+  async function verifyEmail(request) {
+    const body = await readBody(request);
+    const token = typeof body.token === 'string' ? body.token : '';
+    const [row] = token ? await store.find('accounts', 'verifyTokenHash', await hashToken(token)) : [];
+    if (!row || !(Date.parse(row.verifyExpires) > now().getTime())) {
+      throw new HttpError(400, 'Линкът не е валиден: може да е непълен, вече използван или изтекъл.');
+    }
+    await store.update('accounts', row.id, { emailVerifiedAt: nowIso(), verifyTokenHash: '', verifyExpires: '' });
+    return json({ ok: true });
+  }
+
+  // Отговорът е еднакъв и работата е на заден план, за да не издава дали имейлът е регистриран.
+  async function forgotPassword(request, ctx) {
+    const body = await readBody(request);
+    const email = clean(body.email, 200).toLowerCase();
+    const table = body.operator === true ? 'operators' : 'accounts';
+    const work = (async () => {
+      const [row] = await store.find(table, table === 'operators' ? 'id' : 'email', email);
+      if (!row || (table === 'operators' && row.isActive !== 'Да')) return;
+      if (Date.parse(row.resetSentAt) > now().getTime() - MAIL_THROTTLE_MS) return;
+      const link = await issueSetupLink(table, row.id, RESET_TTL_MS);
+      await sendMail(env.MAIL_ACCOUNTS, email, 'Нова парола за портала на БУЛАДМИН', [
+        'Здравейте,',
+        '',
+        'Получихме заявка за нова парола. Задайте я с този линк:',
+        link,
+        '',
+        'Линкът важи 1 час и може да се използва веднъж. Ако не сте я поискали Вие, не правете нищо. Паролата Ви остава същата.',
+      ]);
+    })().catch((err) => console.error('forgot failed', err.message));
+    if (ctx?.waitUntil) ctx.waitUntil(work);
+    else await work;
+    return json({ ok: true });
+  }
+
+  // Изпраща линка по имейл; ако това не успее, го връща, за да го предаде операторът сам.
+  async function deliverLink(to, subject, lines, link) {
+    const emailed = await sendMail(env.MAIL_ACCOUNTS, to, subject, [...lines, link, '', 'Линкът може да се използва веднъж и важи 72 часа.']);
+    return emailed ? { emailed: true, to } : { emailed: false, link };
   }
 
   async function setPasswordWithToken(request) {
@@ -322,6 +425,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       resetTokenHash: '',
       resetExpires: '',
     };
+    // Линкът е стигнал до притежателя на адреса, затова имейлът вече е потвърден.
+    if (table === 'accounts' && !row.emailVerifiedAt) patch.emailVerifiedAt = nowIso();
     await store.update(table, row.id, patch);
     return json(
       { destination: table === 'operators' ? '/admin.html' : '/account.html' },
@@ -376,7 +481,12 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       throw new HttpError(409, 'Вече има оператор с този имейл.', { email: 'Вече има оператор с този имейл.' });
     }
     await store.create('operators', { id: email, fullName, role, isActive: 'Да', sessionVersion: '0', failedLogins: '0' });
-    return json({ link: await issueSetupLink('operators', email) }, 201);
+    const link = await issueSetupLink('operators', email);
+    return json(await deliverLink(email, 'Покана за портала на БУЛАДМИН', [
+      `Здравейте, ${fullName},`,
+      '',
+      'Поканени сте като оператор в портала на БУЛАДМИН. Задайте парола с този линк:',
+    ], link), 201);
   }
 
   async function updateOperator(request, id) {
@@ -396,7 +506,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function operatorResetLink(request, id) {
     requireAdmin(await requireSession(request));
     if (!(await store.find('operators', 'id', id)).length) throw new HttpError(404, 'Операторът не е намерен.');
-    return json({ link: await issueSetupLink('operators', id) });
+    const link = await issueSetupLink('operators', id);
+    return json(await deliverLink(id, 'Нова парола за портала на БУЛАДМИН', ['Здравейте,', '', 'Задайте нова парола с този линк:'], link));
   }
 
   // Няма автоматичен имейл, затова клиент със забравена парола се обажда на оператор,
@@ -406,7 +517,81 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const [client] = await store.find('clients', 'id', id);
     if (!client) throw new HttpError(404, 'Клиентът не е намерен.');
     if (!client.identity.startsWith('local:')) throw new HttpError(422, 'Този клиент влиза с Google или Microsoft и няма парола.');
-    return json({ link: await issueSetupLink('accounts', client.identity.slice('local:'.length)) });
+    const accountId = client.identity.slice('local:'.length);
+    const link = await issueSetupLink('accounts', accountId);
+    return json(await deliverLink(client.loginEmail, 'Нова парола за портала на БУЛАДМИН', [
+      'Здравейте,',
+      '',
+      'Операторът на БУЛАДМИН Ви изпрати линк за нова парола:',
+    ], link));
+  }
+
+  // --- Клиентски данни (оператори) ---
+
+  async function adminGetClient(request, id) {
+    requireOperator(await requireSession(request));
+    const [client] = await store.find('clients', 'id', id);
+    if (!client) throw new HttpError(404, 'Клиентът не е намерен.');
+    const [requests, events] = await Promise.all([
+      store.find('requests', 'clientId', id),
+      store.find('events', 'requestId', id),
+    ]);
+    return json({
+      client: publicClient(client),
+      requests: requests.sort(byNewest('createdAt')),
+      events: events.sort(byOldest('occurredAt')),
+    });
+  }
+
+  // Записва кой е видял пълното ЕГН, но не и самата стойност.
+  async function adminRevealEgn(request, id) {
+    const operator = requireOperator(await requireSession(request));
+    const [client] = await store.find('clients', 'id', id);
+    if (!client) throw new HttpError(404, 'Клиентът не е намерен.');
+    await addEvent({
+      requestId: id,
+      actorType: 'Оператор',
+      actorName: operator.fullName || operator.id,
+      action: 'Преглед на пълното ЕГН',
+      visibility: 'Вътрешно',
+    });
+    return json({ egn: client.egn });
+  }
+
+  async function adminUpdateClient(request, id) {
+    const operator = requireOperator(await requireSession(request));
+    const [client] = await store.find('clients', 'id', id);
+    if (!client) throw new HttpError(404, 'Клиентът не е намерен.');
+    const body = await readBody(request);
+    const currentKind = client.companyName ? 'company' : 'individual';
+    const kind = body.kind === 'company' || body.kind === 'individual' ? body.kind : currentKind;
+    const { fields, errors } = validateRegistration({ ...body, kind, consent: true }, { egnOptional: true });
+    failIfErrors(errors);
+    if (kind === 'individual' && !fields.egn) delete fields.egn; // празно поле: ЕГН остава същото
+
+    const changed = Object.keys(fields).filter((key) => fields[key] !== (client[key] ?? ''));
+    if (!changed.length) return json({ client: publicClient(client) });
+
+    const updatedAt = nowIso();
+    await store.update('clients', id, { ...fields, updatedAt });
+    const next = { ...client, ...fields, updatedAt };
+
+    // Името и видът се пазят и в заявките, за да се виждат в таблицата със заявки.
+    const name = displayName(next);
+    if (name !== displayName(client) || next.personType !== client.personType) {
+      for (const row of await store.find('requests', 'clientId', id)) {
+        await store.update('requests', row.id, { clientName: name, personType: next.personType });
+      }
+    }
+    // В историята са само имената на полетата, без старите и новите стойности.
+    await addEvent({
+      requestId: id,
+      actorType: 'Оператор',
+      actorName: operator.fullName || operator.id,
+      action: `Редактирани данни: ${changed.map((key) => CLIENT_LABELS[key] || key).join(', ')}`,
+      visibility: 'Вътрешно',
+    });
+    return json({ client: publicClient(next) });
   }
 
   // --- Клиент ---
@@ -419,6 +604,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const principal = session.principal;
     return json({
       security: principal && { google: !!principal.googleId, microsoft: !!principal.microsoftId },
+      needsEmailVerification: mailEnabled && session.provider === 'local' && !principal.emailVerifiedAt,
       authenticated: true,
       identity: {
         provider: session.provider,
@@ -473,6 +659,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function createRequest(request) {
     const session = await requireSession(request);
     const client = await requireClient(session);
+    if (mailEnabled && session.provider === 'local' && !session.principal.emailVerifiedAt) {
+      throw new HttpError(403, 'Първо потвърдете имейла си с линка, който Ви изпратихме.');
+    }
     const body = await readBody(request);
     const serviceCategory = clean(body.serviceCategory, 100);
     const service = clean(body.service, 100);
@@ -514,6 +703,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       toStatus: 'Нова',
       visibility: 'Клиент',
     });
+    await sendMail(env.MAIL_NOREPLY, client.contactEmail, `Заявка ${record.id} е приета`, [
+      'Здравейте,',
+      '',
+      `Получихме заявката Ви за „${service}“ с № ${record.id}. Ще се свържем с Вас, ако е нужно уточнение.`,
+      '',
+      `Проследяване: ${requestUrl(record.id)}`,
+    ]);
     return json({ request: publicRequest(record) }, 201);
   }
 
@@ -621,6 +817,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         toStatus: patch.requestStatus,
         visibility: 'Клиент',
       });
+      await notifyClient(record.clientId, `Заявка ${id}: нов статус „${patch.requestStatus}“`, [
+        'Здравейте,',
+        '',
+        `Статусът на заявката Ви за „${record.service}“ вече е „${patch.requestStatus}“.`,
+        '',
+        `Подробности: ${requestUrl(id)}`,
+      ]);
     }
     if (patch.assignedTo !== undefined) {
       await addEvent({
@@ -650,17 +853,35 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       visibility: internal ? 'Вътрешно' : 'Клиент',
     });
     await store.update('requests', id, { updatedAt: nowIso() });
+    // Самият текст остава в портала, а в имейла е само известието.
+    if (!internal) {
+      await notifyClient(record.clientId, `Заявка ${id}: ново съобщение от БУЛАДМИН`, [
+        'Здравейте,',
+        '',
+        `Имате ново съобщение по заявката си за „${record.service}“.`,
+        '',
+        `Прочетете го тук: ${requestUrl(id)}`,
+      ]);
+    }
     return json({ ok: true }, 201);
   }
 
   // --- Маршрутизиране ---
 
-  async function route(request, url) {
+  async function route(request, url, ctx) {
     const { pathname: path } = url;
     const method = request.method;
     let m;
 
-    if (method === 'GET' && path === '/api/meta') return json({ catalog: CATALOG, statuses: STATUSES });
+    if (method === 'GET' && path === '/api/meta') return json({ catalog: CATALOG, statuses: STATUSES, mailEnabled });
+    if (method === 'POST' && path === '/api/auth/forgot') return forgotPassword(request, ctx);
+    if (method === 'POST' && path === '/api/auth/verify-email') return verifyEmail(request);
+    if (method === 'POST' && path === '/api/auth/resend-verification') return resendVerification(request);
+    if ((m = path.match(/^\/api\/admin\/clients\/([\w-]{1,60})$/))) {
+      if (method === 'GET') return adminGetClient(request, m[1]);
+      if (method === 'PATCH') return adminUpdateClient(request, m[1]);
+    }
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/clients\/([\w-]{1,60})\/egn$/))) return adminRevealEgn(request, m[1]);
     if (method === 'GET' && (m = path.match(/^\/api\/auth\/(\w+)\/start$/)) && isProvider(m[1])) return authStart(m[1]);
     if (method === 'GET' && (m = path.match(/^\/api\/auth\/(\w+)\/callback$/)) && isProvider(m[1])) return authCallback(request, m[1], url);
     if (method === 'POST' && path === '/api/auth/signup') return signup(request);
@@ -696,13 +917,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     throw new HttpError(404, 'Няма такъв адрес.');
   }
 
-  return async function handle(request) {
+  return async function handle(request, ctx) {
     try {
       // SameSite=Lax пази сесията, а тази проверка спира междусайтови заявки за промяна.
       if (!['GET', 'HEAD'].includes(request.method) && request.headers.get('origin') !== env.PORTAL_ORIGIN) {
         throw new HttpError(403, 'Заявката е отказана.');
       }
-      return await route(request, new URL(request.url));
+      return await route(request, new URL(request.url), ctx);
     } catch (err) {
       if (err instanceof HttpError) return json({ error: { message: err.message, fields: err.fields } }, err.status);
       console.error('unhandled', err.message);

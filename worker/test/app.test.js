@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { createApp, SESSION_COOKIE } from '../src/app.js';
 import { b64url, b64urlDecode, clientAssertion, signToken } from '../src/crypto.js';
 import { GraphStore, MemoryStore } from '../src/store.js';
-import { isValidEik, validateRegistration } from '../src/validate.js';
+import { isValidEgnOrLnch, isValidEik, validateRegistration } from '../src/validate.js';
 
 const ORIGIN = 'https://portal.test';
 const TENANT = 'tenant-1';
@@ -65,7 +65,7 @@ async function call(app, method, path, { as, body, origin = ORIGIN, cookie } = {
 }
 
 const individual = {
-  kind: 'individual', firstName: 'Алис', lastName: 'Иванова', phone: '+359 888 123 456',
+  kind: 'individual', firstName: 'Алис', lastName: 'Иванова', egn: '7501020018', phone: '+359 888 123 456',
   contactEmail: 'alice@example.com', city: 'София', address: 'ул. Първа 1', consent: true,
 };
 const company = {
@@ -517,6 +517,186 @@ test('свързан локален клиент влиза с Google в соб�
   assert.equal(me.data.identity.provider, 'local');
   assert.equal(me.data.identity.email, 'a@example.com');
   assert.equal(me.data.security.google, true);
+});
+
+// --- ЕГН и редакция от оператор ---
+
+test('ЕГН/ЛНЧ: контролни цифри и дати, сметнати на ръка', () => {
+  assert.equal(isValidEgnOrLnch('7501020018'), true); // 63 mod 11 = 8
+  assert.equal(isValidEgnOrLnch('1234567893'), true); // ЛНЧ: 353 mod 10 = 3
+  assert.equal(isValidEgnOrLnch('12345'), false);
+  assert.equal(isValidEgnOrLnch('abcdefghij'), false);
+  // Месец 02, ден 31 е невалидна дата; контролната цифра по ЕГН не спасява, а ЛНЧ не съвпада.
+  assert.equal(isValidEgnOrLnch('7502310010'), false);
+  assert.equal(validateRegistration({ ...individual, egn: '7501020017' }).errors.egn !== undefined, true);
+  assert.equal(validateRegistration({ ...individual, egn: '' }).errors.egn !== undefined, true);
+  assert.equal(validateRegistration({ ...individual, egn: '' }, { egnOptional: true }).errors.egn, undefined);
+  assert.equal(validateRegistration({ ...company, egn: '7501020018' }).fields.egn, '');
+});
+
+test('ЕГН: записва се, но излиза само маскирано', async () => {
+  const { app, store } = setup();
+  const id = await withRequest(app);
+  const row = store.tables.clients[0];
+  assert.equal(row.egn, '7501020018');
+  const leaks = [
+    await call(app, 'GET', '/api/me', { as: 'alice' }),
+    await call(app, 'GET', `/api/requests/${id}`, { as: 'alice' }),
+    await call(app, 'GET', '/api/admin/overview', { as: 'op' }),
+    await call(app, 'GET', `/api/admin/requests/${id}`, { as: 'op' }),
+    await call(app, 'GET', `/api/admin/clients/${row.id}`, { as: 'op' }),
+  ];
+  for (const res of leaks) assert.ok(!JSON.stringify(res.data).includes('7501020018'));
+  assert.equal(leaks[0].data.client.egnMasked, '••••••••18');
+});
+
+test('пълно ЕГН: само за оператор и със запис в историята', async () => {
+  const { app, store } = setup();
+  await registered(app);
+  const { id } = store.tables.clients[0];
+  assert.equal((await call(app, 'POST', `/api/admin/clients/${id}/egn`, { as: 'alice' })).status, 403);
+  const res = await call(app, 'POST', `/api/admin/clients/${id}/egn`, { as: 'plain' });
+  assert.equal(res.data.egn, '7501020018');
+  const [event] = store.tables.events.filter((e) => e.requestId === id);
+  assert.equal(event.action, 'Преглед на пълното ЕГН');
+  assert.equal(event.actorName, 'Обикновен');
+  assert.ok(!JSON.stringify(event).includes('7501020018'));
+});
+
+test('редакция от оператор: променя данните, името в заявките и пише историята без стойности', async () => {
+  const { app, store } = setup();
+  const requestId = await withRequest(app);
+  const { id } = store.tables.clients[0];
+  const body = { ...individual, firstName: 'Нова', phone: '0888000111', egn: '' };
+  assert.equal((await call(app, 'PATCH', `/api/admin/clients/${id}`, { as: 'alice', body })).status, 403);
+  const res = await call(app, 'PATCH', `/api/admin/clients/${id}`, { as: 'plain', body });
+  assert.equal(res.status, 200);
+  const row = store.tables.clients[0];
+  assert.equal(row.firstName, 'Нова');
+  assert.equal(row.egn, '7501020018'); // празно поле не трие ЕГН
+  assert.equal(store.tables.requests.find((r) => r.id === requestId).clientName, 'Нова Иванова');
+  const event = store.tables.events.find((e) => e.requestId === id);
+  assert.equal(event.action, 'Редактирани данни: Телефон, Име');
+  assert.equal(event.visibility, 'Вътрешно');
+  assert.ok(!JSON.stringify(event).includes('0888000111'));
+  // Клиентът не вижда записа за редакцията.
+  const view = await call(app, 'GET', `/api/requests/${requestId}`, { as: 'alice' });
+  assert.ok(!JSON.stringify(view.data).includes('Редактирани'));
+});
+
+test('редакция от оператор: невалидни данни и нов ЕИК', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  const { id } = store.tables.clients[0];
+  assert.equal((await call(app, 'PATCH', `/api/admin/clients/${id}`, { as: 'op', body: { ...company, eik: '123456787' } })).status, 422);
+  assert.equal((await call(app, 'PATCH', `/api/admin/clients/${id}`, { as: 'op', body: { ...company, eik: '130460283' } })).status, 200);
+  assert.equal(store.tables.clients[0].eik, '130460283');
+});
+
+// --- Имейли ---
+
+function mailSetup() {
+  const store = new MemoryStore({
+    operators: [{ id: 'op@bulmail.eu', fullName: 'Оп', isActive: 'Да', role: 'Администратор', sessionVersion: '0' }],
+  });
+  const mailEnv = { ...env, MAIL_ENABLED: 'true', MAIL_ACCOUNTS: 'accounts@portal.test', MAIL_NOREPLY: 'no-reply@portal.test' };
+  return { store, app: createApp({ env: mailEnv, store }) };
+}
+const linkIn = (mail) => mail.text.match(/https:\S+#t=\S+/)[0];
+
+test('потвърждение на имейл: изисква се за заявка, изпраща се от accounts@', async () => {
+  const { app, store } = mailSetup();
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const cookie = cookieOf(res.res);
+  const [mail] = store.sentMail;
+  assert.equal(mail.from, 'accounts@portal.test');
+  assert.equal(mail.to, 'a@example.com');
+  assert.equal((await call(app, 'GET', '/api/me', { cookie })).data.needsEmailVerification, true);
+  await call(app, 'POST', '/api/register', { cookie, body: individual });
+  assert.equal((await call(app, 'POST', '/api/requests', { cookie, body: newRequest })).status, 403);
+  assert.equal((await call(app, 'POST', '/api/auth/resend-verification', { cookie })).status, 429);
+
+  const token = linkIn(mail).split('#t=')[1];
+  assert.ok(!store.tables.accounts[0].verifyTokenHash.includes(token));
+  assert.equal((await call(app, 'POST', '/api/auth/verify-email', { body: { token: 'v.wrong' } })).status, 400);
+  assert.equal((await call(app, 'POST', '/api/auth/verify-email', { body: { token } })).status, 200);
+  assert.equal((await call(app, 'POST', '/api/auth/verify-email', { body: { token } })).status, 400);
+  assert.equal((await call(app, 'GET', '/api/me', { cookie })).data.needsEmailVerification, false);
+  assert.equal((await call(app, 'POST', '/api/requests', { cookie, body: newRequest })).status, 201);
+  const confirm = store.sentMail.at(-1);
+  assert.equal(confirm.from, 'no-reply@portal.test');
+  assert.equal(confirm.to, 'alice@example.com');
+});
+
+test('забравена парола: еднакъв отговор, ограничение, линкът работи', async () => {
+  const { app, store } = mailSetup();
+  await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  store.sentMail.length = 0;
+  const known = await call(app, 'POST', '/api/auth/forgot', { body: { email: 'A@example.com' } });
+  const unknown = await call(app, 'POST', '/api/auth/forgot', { body: { email: 'no@example.com' } });
+  assert.deepEqual(known.data, unknown.data);
+  assert.equal(known.status, unknown.status);
+  assert.equal(store.sentMail.length, 1);
+  await call(app, 'POST', '/api/auth/forgot', { body: { email: 'a@example.com' } });
+  assert.equal(store.sentMail.length, 1); // в рамките на 5 минути не се праща втори
+  const token = linkIn(store.sentMail[0]).split('#t=')[1];
+  assert.equal((await call(app, 'POST', '/api/auth/set-password', { body: { token, password: 'съвсем-нова-парола' } })).status, 200);
+  assert.ok(store.tables.accounts[0].emailVerifiedAt);
+  assert.equal((await call(app, 'POST', '/api/auth/login', { body: { email: 'a@example.com', password: 'съвсем-нова-парола' } })).status, 200);
+});
+
+test('покана: при успешен имейл линкът не се връща, при неуспех се връща', async () => {
+  const { app, store } = mailSetup();
+  const ok = await call(app, 'POST', '/api/admin/operators', { as: 'op', body: { email: 'n@y.bg', fullName: 'Н' } });
+  assert.equal(ok.data.emailed, true);
+  assert.equal(ok.data.link, undefined);
+  assert.equal(store.sentMail[0].from, 'accounts@portal.test');
+  store.sendMail = async () => { throw new Error('Graph POST failed: 403'); };
+  const failed = await call(app, 'POST', '/api/admin/operators', { as: 'op', body: { email: 'm@y.bg', fullName: 'М' } });
+  assert.equal(failed.status, 201);
+  assert.equal(failed.data.emailed, false);
+  assert.ok(failed.data.link.includes('#t=o.'));
+});
+
+test('известия: статус и съобщение до клиента, но не и вътрешна бележка', async () => {
+  const { app, store } = mailSetup();
+  await call(app, 'POST', '/api/register', { as: 'alice', body: individual });
+  const { request } = (await call(app, 'POST', '/api/requests', { as: 'alice', body: newRequest })).data;
+  store.sentMail.length = 0;
+  const url = `/api/admin/requests/${request.id}`;
+  await call(app, 'PATCH', url, { as: 'op', body: { requestStatus: 'Подадена' } });
+  assert.equal(store.sentMail.length, 1);
+  assert.ok(store.sentMail[0].subject.includes('Подадена'));
+  await call(app, 'POST', `${url}/messages`, { as: 'op', body: { message: 'ТАЙНА бележка' } });
+  assert.equal(store.sentMail.length, 1);
+  await call(app, 'POST', `${url}/messages`, { as: 'op', body: { message: 'ЛИЧЕН текст', internal: false } });
+  assert.equal(store.sentMail.length, 2);
+  for (const mail of store.sentMail) {
+    assert.equal(mail.from, 'no-reply@portal.test');
+    assert.equal(mail.to, 'alice@example.com');
+    assert.ok(!mail.text.includes('ЛИЧЕН') && !mail.text.includes('7501020018'));
+  }
+});
+
+test('имейлите са изключени: няма изпращане и няма изискване за потвърждение', async () => {
+  const { app, store } = setup();
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const cookie = cookieOf(res.res);
+  assert.equal(store.sentMail.length, 0);
+  await call(app, 'POST', '/api/register', { cookie, body: individual });
+  assert.equal((await call(app, 'POST', '/api/requests', { cookie, body: newRequest })).status, 201);
+  const invite = await call(app, 'POST', '/api/admin/operators', { as: 'op', body: { email: 'n@y.bg', fullName: 'Н' } });
+  assert.ok(invite.data.link);
+});
+
+test('Graph: имейлът се праща от посочената кутия', async () => {
+  const { store, calls } = fakeGraph(() => new Response(null, { status: 202 }));
+  await store.sendMail('no-reply@x.bg', 'a@b.bg', 'Тема', 'Текст');
+  const [sent] = calls();
+  assert.ok(sent.url.endsWith('/users/no-reply%40x.bg/sendMail'));
+  const body = JSON.parse(sent.init.body);
+  assert.equal(body.saveToSentItems, false);
+  assert.equal(body.message.toRecipients[0].emailAddress.address, 'a@b.bg');
 });
 
 // --- Форма на заявките към Microsoft Graph ---

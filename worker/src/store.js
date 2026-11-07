@@ -49,7 +49,7 @@ export class GraphStore {
           ...init.headers,
         },
       });
-      if (res.ok) return res.json();
+      if (res.ok) return res.status === 202 || res.status === 204 ? null : res.json();
       if ([429, 503, 504].includes(res.status) && attempt < 3) {
         const wait = Math.min(Number(res.headers.get('retry-after')) || 2 ** attempt, 8);
         await new Promise((resolve) => setTimeout(resolve, wait * 1000));
@@ -108,6 +108,20 @@ export class GraphStore {
     return record;
   }
 
+  sendMail(from, to, subject, text) {
+    return this.request(`${GRAPH}/users/${encodeURIComponent(from)}/sendMail`, {
+      method: 'POST',
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: 'Text', content: text },
+          toRecipients: [{ emailAddress: { address: to } }],
+        },
+        saveToSentItems: false,
+      }),
+    });
+  }
+
   async update(table, id, patch) {
     const [item] = await this.fetchItems(table, `fields/Title eq ${odataString(id)}`);
     if (!item) throw new Error('Record not found');
@@ -122,7 +136,9 @@ export class GraphStore {
 export class MemoryStore {
   constructor(seed = {}) {
     this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], ...seed };
+    this.sentMail = [];
   }
+  async sendMail(from, to, subject, text) { this.sentMail.push({ from, to, subject, text }); }
   async list(table) { return this.tables[table].map((r) => ({ ...r })); }
   async find(table, field, value) { return (await this.list(table)).filter((r) => r[field] === value); }
   async create(table, record) { this.tables[table].push({ ...record }); return record; }
