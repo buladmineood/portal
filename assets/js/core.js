@@ -257,6 +257,196 @@ export function mount({ tag, user }) {
   return main;
 }
 
+// --- Икони ---
+
+const ICONS = {
+  home: 'M3 11l9-8 9 8M5 9.5V21h5v-6h4v6h5V9.5',
+  inbox: 'M3 13l3-9h12l3 9M3 13v7h18v-7M3 13h5l2 3h4l2-3h5',
+  users: 'M16 20v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 20v-1a4 4 0 0 0-3-3.8M16 3.2a4 4 0 0 1 0 7.6',
+  check: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9',
+  shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10M9 12l2 2 4-4',
+  team: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 21a8 8 0 0 1 16 0M18 8h4M20 6v4',
+  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 21a8 8 0 0 1 16 0',
+  plus: 'M12 5v14M5 12h14',
+  logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9',
+  doc: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h6',
+  search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16M21 21l-4.3-4.3',
+  phone: 'M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2',
+  mail: 'M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2M22 6l-10 7L2 6',
+  clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20M12 6v6l4 2',
+  alert: 'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0',
+  arrow: 'M5 12h14M13 6l6 6-6 6',
+  back: 'M19 12H5M11 18l-6-6 6-6',
+  copy: 'M9 9h11a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2zM5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1',
+  send: 'M22 2L11 13M22 2l-7 20-4-9-9-4z',
+  building: 'M3 21h18M5 21V7l7-4 7 4v14M9 9h1M14 9h1M9 13h1M14 13h1M9 17h1M14 17h1',
+  scale: 'M12 3v18M7 21h10M5 7h14M5 7l-3 7a3.5 3.5 0 0 0 6 0zM19 7l-3 7a3.5 3.5 0 0 0 6 0z',
+  handshake: 'M3 7l5-3 4 3 4-3 5 3v8l-9 6-9-6zM12 7l-4 4 2 2 3-2 4 4',
+  car: 'M5 17h14M5 17a2 2 0 1 0 4 0M15 17a2 2 0 1 0 4 0M3 17v-5l2-6h14l2 6v5M3 12h18',
+  monitor: 'M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2M8 21h8M12 17v4',
+  stamp: 'M5 21h14M5 17h14v-3a2 2 0 0 0-2-2h-2l-1-3a3 3 0 1 0-4 0l-1 3H7a2 2 0 0 0-2 2z',
+  briefcase: 'M4 7h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2M2 13h20',
+};
+
+export function icon(name, size = 20) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', size);
+  svg.setAttribute('height', size);
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', ICONS[name] || '');
+  svg.append(path);
+  return svg;
+}
+
+export const CATEGORY_ICONS = {
+  'Документи': 'doc',
+  'Имоти': 'building',
+  'Наследства': 'scale',
+  'Представителство': 'handshake',
+  'Превозни средства': 'car',
+  'Електронни услуги': 'monitor',
+  'Регистрации и разрешения': 'stamp',
+  'Обслужване на фирми': 'briefcase',
+};
+
+// --- Кратки известия и потвърждения ---
+
+let toastRegion;
+export function toast(message, kind = 'ok') {
+  if (!toastRegion?.isConnected) {
+    toastRegion = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
+    document.body.append(toastRegion);
+  }
+  const item = h('div', { class: `toast toast--${kind}` }, icon(kind === 'error' ? 'alert' : 'check', 18), h('span', {}, message));
+  toastRegion.append(item);
+  setTimeout(() => item.remove(), kind === 'error' ? 7000 : 4000);
+}
+
+export function confirmDialog({ title, text, confirmLabel = 'Потвърдете', danger = false }) {
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    const dialog = h('dialog', { class: 'dialog', 'aria-labelledby': 'dialog-title' },
+      h('h2', { id: 'dialog-title' }, title),
+      h('p', { class: 'muted' }, text),
+      h('div', { class: 'row dialog__actions' },
+        h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => finish(false) }, 'Отказ'),
+        h('button', { class: `btn ${danger ? 'btn--danger' : ''}`, type: 'button', onclick: () => finish(true) }, confirmLabel)));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      finish(false);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+}
+
+export function copyButton(value, label = 'Копирайте') {
+  return h('button', {
+    class: 'icon-btn', type: 'button', title: label, 'aria-label': `${label}: ${value}`,
+    onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        toast('Копирано.');
+      } catch {
+        toast('Не успяхме да копираме. Маркирайте текста ръчно.', 'error');
+      }
+    },
+  }, icon('copy', 16));
+}
+
+// --- Време и напредък ---
+
+const relative = new Intl.RelativeTimeFormat('bg', { numeric: 'auto' });
+export function timeAgo(iso) {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const minutes = Math.round((then - Date.now()) / 60000);
+  if (Math.abs(minutes) < 60) return relative.format(minutes, 'minute');
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return relative.format(hours, 'hour');
+  const days = Math.round(hours / 24);
+  if (Math.abs(days) < 30) return relative.format(days, 'day');
+  return formatDate(iso);
+}
+
+export function progress(status) {
+  if (status === 'Отказана') return h('div', { class: 'progress progress--stopped', 'aria-hidden': 'true' }, h('span', { style: 'width:100%' }));
+  const step = TRACK.indexOf(status) + 1;
+  return h('div', { class: 'progress', 'aria-hidden': 'true' }, h('span', { style: `width:${Math.round((step / TRACK.length) * 100)}%` }));
+}
+
+export const emptyState = (iconName, title, text, action) => h('div', { class: 'empty' },
+  h('span', { class: 'empty__icon' }, icon(iconName, 26)),
+  h('h3', {}, title),
+  text && h('p', { class: 'muted' }, text),
+  action);
+
+export const pageHead = (title, subtitle, ...actions) => h('header', { class: 'page-head' },
+  h('div', { class: 'page-head__text' }, h('h1', {}, title), subtitle && h('p', { class: 'muted' }, subtitle)),
+  actions.length > 0 && h('div', { class: 'row' }, actions));
+
+// --- Рамка на приложението ---
+
+export function mountShell({ tag, user, detail, nav }) {
+  const main = h('main', { class: 'app__main', id: 'main', tabindex: '-1' });
+  const navList = h('ul', { class: 'app__nav-list' });
+  const logout = async () => {
+    await api('/auth/logout', { method: 'POST' }).catch(() => {});
+    location.href = '/';
+  };
+  const brand = () => h('a', { class: 'brand brand--light', href: '#/' },
+    h('span', { class: 'brand__tile' }, h('img', { src: '/assets/img/logo-mark.webp', alt: '', width: 28, height: 28 })),
+    h('span', { class: 'brand__word' }, 'БУЛ', h('b', {}, 'АДМИН')));
+  const shell = h('div', { class: 'app' },
+    h('header', { class: 'app__top' },
+      brand(),
+      h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Изход', title: 'Изход', onclick: logout }, icon('logout', 20))),
+    h('aside', { class: 'app__side' },
+      h('div', { class: 'app__brand' }, brand(), tag && h('span', { class: 'app__tag' }, tag)),
+      h('nav', { class: 'app__nav', 'aria-label': 'Основно меню' }, navList),
+      h('div', { class: 'app__user' },
+        h('div', { class: 'app__user-text' }, h('strong', {}, user), detail && h('span', {}, detail)),
+        h('button', { class: 'icon-btn icon-btn--light', type: 'button', 'aria-label': 'Изход', title: 'Изход', onclick: logout }, icon('logout', 20)))),
+    main);
+  document.body.replaceChildren(shell);
+
+  let badges = {};
+  const render = () => {
+    const path = location.hash.replace(/^#/, '').split('?')[0] || '/';
+    navList.replaceChildren(...nav().map((item) => {
+      const active = item.match.test(path);
+      const count = badges[item.key];
+      return h('li', {}, h('a', { href: item.href, class: active ? 'is-active' : '', 'aria-current': active ? 'page' : null },
+        icon(item.icon),
+        h('span', { class: 'app__nav-label' }, item.label),
+        count > 0 && h('span', { class: 'badge', 'aria-label': `${count} чакащи` }, String(count))));
+    }));
+    // На телефон менюто се превърта хоризонтално: активният раздел остава видим.
+    navList.querySelector('.is-active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  };
+  render();
+  window.addEventListener('hashchange', render);
+  return {
+    main,
+    render,
+    setBadges: (next) => {
+      badges = next;
+      render();
+    },
+  };
+}
+
 export function fatal(main, err) {
   main.replaceChildren(h('div', { class: 'wrap wrap--narrow section' },
     h('div', { class: 'alert alert--error', role: 'alert' }, err.message || 'Възникна грешка.'),

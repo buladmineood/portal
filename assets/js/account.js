@@ -1,116 +1,206 @@
 import {
-  api, contactFields, fatal, field, formatDate, formatTime, formValues, h, identityFields, loginLabel, mount, securityCards, showError,
-  showFieldErrors, statusPill, tracker,
+  api, CATEGORY_ICONS, contactFields, copyButton, emptyState, fatal, field, formatDate, formatTime, formValues, h, icon, identityFields, loginLabel,
+  mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, statusPill, timeAgo, toast, tracker,
 } from './core.js';
 
 let main;
 let state;
+let listFilter = { q: '', group: 'active' };
 
 const clientName = (c) => c.companyName || [c.firstName, c.lastName].filter(Boolean).join(' ');
 const isCompany = (c) => !!c.companyName;
 const hasIdentity = (c) => !!(isCompany(c) ? c.representativeEgnMasked : c.egnMasked);
+const CLOSED = ['Получена', 'Отказана'];
+const norm = (s) => String(s || '').toLocaleLowerCase('bg');
 
 function page(...children) {
-  main.replaceChildren(h('div', { class: 'wrap wrap--narrow section stack' }, children));
+  main.replaceChildren(h('div', { class: 'page' }, children));
   window.scrollTo(0, 0);
+  main.focus({ preventScroll: true });
 }
+const loading = () => main.replaceChildren(h('div', { class: 'loading' }, 'Зареждане…'));
 
 function verificationBanner() {
   if (!state.me.needsEmailVerification) return null;
-  const result = h('div', { 'aria-live': 'polite' });
-  return h('div', { class: 'alert alert--warn stack' },
-    h('p', {}, `Потвърдете имейла си ${state.me.identity.email} с линка, който Ви изпратихме. Дотогава не можете да подавате заявки.`),
+  return h('div', { class: 'alert alert--warn banner' },
+    icon('mail'),
+    h('div', { class: 'banner__text' },
+      h('strong', {}, 'Потвърдете имейла си'),
+      h('p', {}, `Изпратихме линк до ${state.me.identity.email}. Без потвърждение не можете да подавате заявки.`)),
     h('button', {
       class: 'btn btn--ghost btn--small', type: 'button',
       onclick: async () => {
         try {
           await api('/auth/resend-verification', { method: 'POST' });
-          result.replaceChildren('Изпратихме нов линк. Проверете и папката за нежелана поща.');
+          toast('Изпратихме нов линк. Проверете и папката за нежелана поща.');
         } catch (err) {
-          result.replaceChildren(err.message);
+          toast(err.message, 'error');
         }
       },
-    }, 'Изпратете линка отново'),
-    result);
+    }, 'Изпратете отново'));
 }
 
-async function viewList() {
-  page(h('div', { class: 'loading' }, 'Зареждане…'));
+const requestCard = (r) => h('a', { class: 'req-card', href: `#/r/${r.id}` },
+  h('span', { class: 'req-card__icon' }, icon(CATEGORY_ICONS[r.serviceCategory] || 'doc')),
+  h('span', { class: 'req-card__body' },
+    h('span', { class: 'req-card__top' },
+      h('span', { class: 'req-card__title' }, r.service),
+      statusPill(r.requestStatus)),
+    h('span', { class: 'req-card__meta' }, `${r.serviceCategory} · № ${r.id} · ${timeAgo(r.updatedAt || r.createdAt)}`),
+    progress(r.requestStatus)));
+
+async function viewHome() {
+  loading();
   const { requests } = await api('/requests');
+  const active = requests.filter((r) => !CLOSED.includes(r.requestStatus));
+  const closed = requests.filter((r) => CLOSED.includes(r.requestStatus));
+  const results = h('div', {});
+
+  const render = () => {
+    const pool = listFilter.group === 'active' ? active : listFilter.group === 'closed' ? closed : requests;
+    const q = norm(listFilter.q);
+    const rows = pool.filter((r) => !q || norm(`${r.id} ${r.service} ${r.serviceCategory} ${r.details}`).includes(q));
+    results.replaceChildren(rows.length
+      ? h('div', { class: 'req-cards' }, rows.map(requestCard))
+      : emptyState('search', 'Няма заявки по тези критерии', 'Опитайте с друго търсене или вижте всички заявки.'));
+    chips.replaceChildren(...[['active', 'Активни', active.length], ['closed', 'Приключени', closed.length], ['all', 'Всички', requests.length]].map(([key, label, count]) =>
+      h('button', {
+        class: 'chip', type: 'button', 'aria-pressed': String(listFilter.group === key),
+        onclick: () => {
+          listFilter.group = key;
+          render();
+        },
+      }, label, h('span', { class: 'chip__count' }, String(count)))));
+  };
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Филтър по състояние' });
+  const search = h('input', {
+    type: 'search', value: listFilter.q, placeholder: 'Търсене по номер или услуга', 'aria-label': 'Търсене',
+    oninput: () => {
+      listFilter.q = search.value;
+      render();
+    },
+  });
+
+  const firstName = state.client.firstName || state.client.companyName;
+  if (!requests.length) {
+    page(
+      verificationBanner(),
+      pageHead(`Здравейте, ${firstName}`, 'Оттук подавате заявки и следите докъде са стигнали.'),
+      emptyState('doc', 'Още нямате заявки', 'Изберете услуга и опишете какво трябва да се свърши. Останалото оставете на нас.',
+        h('a', { class: 'btn', href: '#/new' }, icon('plus', 18), 'Нова заявка')),
+    );
+    return;
+  }
   page(
     verificationBanner(),
-    h('div', { class: 'row row--between' },
-      h('h1', {}, 'Моите заявки'),
-      h('a', { class: 'btn', href: '#/new' }, 'Нова заявка')),
-    requests.length
-      ? h('div', { class: 'req-list' }, requests.map((r) =>
-          h('a', { class: 'req-item', href: `#/r/${r.id}` },
-            h('div', { class: 'req-item__top' },
-              h('span', { class: 'req-item__title' }, r.service),
-              statusPill(r.requestStatus)),
-            h('div', { class: 'req-item__meta' }, `${r.serviceCategory} · № ${r.id} · ${formatDate(r.createdAt)}`))))
-      : h('div', { class: 'empty' }, 'Още нямате заявки. Започнете с „Нова заявка“.'),
-    h('p', { class: 'small row' },
-      h('a', { href: '#/profile' }, 'Моите данни'),
-      h('a', { href: '#/privacy' }, 'Искания за лични данни')),
+    pageHead(`Здравейте, ${firstName}`, active.length ? `Имате ${active.length === 1 ? '1 активна заявка' : `${active.length} активни заявки`}.` : 'Нямате активни заявки.',
+      h('a', { class: 'btn', href: '#/new' }, icon('plus', 18), 'Нова заявка')),
+    h('div', { class: 'toolbar' }, chips, h('div', { class: 'search' }, icon('search', 18), search)),
+    results,
   );
+  render();
 }
 
 function viewNew() {
   const { catalog } = state.meta;
   const c = state.client;
-  const alert = h('div', { 'aria-live': 'polite' });
-  // Показва се само ако избраната услуга го изисква и още го няма в профила.
-  const identity = field({
-    name: 'identityNumber',
-    label: isCompany(c) ? 'ЕГН или ЛНЧ на представляващия' : 'ЕГН или ЛНЧ',
-    hint: 'тази услуга го изисква',
-    inputmode: 'numeric', autocomplete: 'off', maxlength: 10, placeholder: '10 цифри',
-  });
-  identity.hidden = true;
-  const service = h('select', { id: 'f-service', name: 'service', disabled: true }, h('option', { value: '' }, 'Първо изберете категория'));
-  const category = h('select', {
-    id: 'f-serviceCategory',
-    name: 'serviceCategory',
-    onchange: () => {
-      const selected = catalog.find((x) => x.name === category.value);
-      service.disabled = !selected;
-      service.replaceChildren(
-        h('option', { value: '' }, selected ? 'Изберете услуга' : 'Първо изберете категория'),
-        ...(selected ? selected.services.map((s) => h('option', { value: s }, s)) : []));
-      identity.hidden = !(selected?.requiresIdentity && !hasIdentity(c));
-    },
-  }, h('option', { value: '' }, 'Изберете категория'), catalog.map((x) => h('option', { value: x.name }, x.name)));
+  const draft = { category: null, service: '', details: '', identityNumber: '' };
+  let step = 1;
 
-  const submit = h('button', { class: 'btn', type: 'submit' }, 'Изпратете заявката');
-  const form = h('form', { class: 'form', novalidate: true },
-    h('div', { class: 'form__grid' },
-      h('div', { class: 'field' }, h('label', { for: 'f-serviceCategory' }, 'Категория'), category),
-      h('div', { class: 'field' }, h('label', { for: 'f-service' }, 'Услуга'), service)),
-    identity,
-    h('div', { class: 'field' },
-      h('label', { for: 'f-details' }, 'Какво трябва да се свърши?'),
-      h('textarea', { id: 'f-details', name: 'details', maxlength: 4000 })),
-    h('p', { class: 'small muted' }, 'Не пишете ЕГН или данни за здраве в описанието.'),
-    alert,
-    h('div', { class: 'row' }, submit, h('a', { class: 'btn btn--ghost', href: '#/' }, 'Отказ')));
+  const steps = () => h('ol', { class: 'wizard-steps', 'aria-label': 'Стъпки' },
+    ['Категория', 'Услуга', 'Подробности'].map((label, i) => h('li', {
+      class: i + 1 < step ? 'is-done' : i + 1 === step ? 'is-current' : '',
+      'aria-current': i + 1 === step ? 'step' : null,
+    }, h('span', { class: 'wizard-steps__dot' }, i + 1 < step ? icon('check', 14) : String(i + 1)), h('span', {}, label))));
 
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    alert.replaceChildren();
-    submit.disabled = true;
-    try {
-      const { request } = await api('/requests', { method: 'POST', body: formValues(form) });
-      state.me = await api('/me');
-      state.client = state.me.client;
-      location.hash = `#/r/${request.id}`;
-    } catch (err) {
-      showFieldErrors(form, err.fields);
-      showError(alert, err.message);
-      submit.disabled = false;
+  function render() {
+    const head = pageHead('Нова заявка', 'Отнема по-малко от минута.');
+    const back = (to) => h('button', {
+      class: 'btn btn--ghost', type: 'button',
+      onclick: () => {
+        step = to;
+        render();
+      },
+    }, icon('back', 18), 'Назад');
+
+    if (step === 1) {
+      page(head, steps(), h('div', { class: 'option-grid' }, catalog.map((category) =>
+        h('button', {
+          class: 'option', type: 'button',
+          onclick: () => {
+            draft.category = category;
+            draft.service = '';
+            step = 2;
+            render();
+          },
+        },
+          h('span', { class: 'option__icon' }, icon(CATEGORY_ICONS[category.name] || 'doc', 22)),
+          h('span', { class: 'option__title' }, category.name),
+          h('span', { class: 'option__text' }, category.services.slice(0, 2).join(', '))))));
+      return;
     }
-  });
-  page(h('a', { class: 'back', href: '#/' }, '← Моите заявки'), h('h1', {}, 'Нова заявка'), h('div', { class: 'card' }, form));
+    if (step === 2) {
+      page(head, steps(),
+        h('h2', {}, draft.category.name),
+        h('div', { class: 'option-list' }, draft.category.services.map((service) =>
+          h('button', {
+            class: 'option option--row', type: 'button',
+            onclick: () => {
+              draft.service = service;
+              step = 3;
+              render();
+            },
+          }, h('span', { class: 'option__title' }, service), icon('arrow', 18)))),
+        h('div', {}, back(1)));
+      return;
+    }
+
+    const alert = h('div', { 'aria-live': 'polite' });
+    const needsIdentity = draft.category.requiresIdentity && !hasIdentity(c);
+    const submit = h('button', { class: 'btn', type: 'submit' }, icon('send', 18), 'Изпратете заявката');
+    const form = h('form', { class: 'form', novalidate: true },
+      h('input', { type: 'hidden', name: 'serviceCategory', value: draft.category.name }),
+      h('input', { type: 'hidden', name: 'service', value: draft.service }),
+      h('div', { class: 'summary' },
+        h('span', { class: 'option__icon' }, icon(CATEGORY_ICONS[draft.category.name] || 'doc', 22)),
+        h('div', {}, h('strong', {}, draft.service), h('p', { class: 'muted small' }, draft.category.name))),
+      needsIdentity && field({
+        name: 'identityNumber',
+        label: isCompany(c) ? 'ЕГН или ЛНЧ на представляващия' : 'ЕГН или ЛНЧ',
+        hint: 'тази услуга го изисква',
+        value: draft.identityNumber, inputmode: 'numeric', autocomplete: 'off', maxlength: 10, placeholder: '10 цифри',
+      }),
+      h('div', { class: 'field' },
+        h('label', { for: 'f-details' }, 'Какво трябва да се свърши?'),
+        h('textarea', {
+          id: 'f-details', name: 'details', maxlength: 4000, value: draft.details,
+          placeholder: 'Например: нужна ми е актуална скица на апартамент в София.',
+        }),
+        h('p', { class: 'small muted', style: 'margin-top:6px' }, 'Не пишете ЕГН или данни за здраве в описанието.')),
+      alert,
+      h('div', { class: 'row' }, back(2), submit));
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      alert.replaceChildren();
+      const values = formValues(form);
+      draft.details = values.details;
+      draft.identityNumber = values.identityNumber || '';
+      submit.disabled = true;
+      try {
+        const { request } = await api('/requests', { method: 'POST', body: values });
+        state.me = await api('/me');
+        state.client = state.me.client;
+        toast('Заявката е изпратена.');
+        location.hash = `#/r/${request.id}`;
+      } catch (err) {
+        showFieldErrors(form, err.fields);
+        showError(alert, err.message);
+        submit.disabled = false;
+      }
+    });
+    page(head, steps(), h('div', { class: 'card' }, form));
+  }
+  render();
 }
 
 function eventLine(e) {
@@ -119,21 +209,24 @@ function eventLine(e) {
 }
 
 async function viewRequest(id) {
-  page(h('div', { class: 'loading' }, 'Зареждане…'));
+  loading();
   const { request: r, events } = await api(`/requests/${encodeURIComponent(id)}`);
   const alert = h('div', { 'aria-live': 'polite' });
-  const send = h('button', { class: 'btn', type: 'submit' }, 'Изпратете');
-  const form = h('form', { class: 'form', novalidate: true },
-    h('div', { class: 'field' },
-      h('label', { for: 'f-message' }, 'Съобщение до БУЛАДМИН'),
-      h('textarea', { id: 'f-message', name: 'message', maxlength: 2000 })),
+  const send = h('button', { class: 'btn', type: 'submit' }, icon('send', 18), 'Изпратете');
+  const textarea = h('textarea', { id: 'f-message', name: 'message', maxlength: 2000, placeholder: 'Напишете съобщение до БУЛАДМИН' });
+  const form = h('form', { class: 'composer', novalidate: true },
+    h('div', { class: 'field' }, h('label', { for: 'f-message', class: 'sr-only' }, 'Съобщение'), textarea),
     alert,
-    h('div', {}, send));
+    h('div', { class: 'composer__actions' }, h('span', { class: 'small muted' }, 'Ctrl + Enter за изпращане'), send));
+  textarea.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) form.requestSubmit();
+  });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     send.disabled = true;
     try {
       await api(`/requests/${encodeURIComponent(id)}/messages`, { method: 'POST', body: formValues(form) });
+      toast('Съобщението е изпратено.');
       await viewRequest(id);
     } catch (err) {
       showFieldErrors(form, err.fields);
@@ -142,22 +235,33 @@ async function viewRequest(id) {
     }
   });
   page(
-    h('a', { class: 'back', href: '#/' }, '← Моите заявки'),
-    h('div', {},
-      h('h1', {}, r.service),
-      h('p', { class: 'muted' }, `${r.serviceCategory} · № ${r.id} · подадена на ${formatDate(r.createdAt)}`)),
-    h('div', { class: 'card stack' }, tracker(r.requestStatus), h('p', { class: 'pre' }, r.details)),
-    h('h2', {}, 'История'),
-    h('ol', { class: 'timeline' }, events.map((e) =>
-      h('li', { class: e.actorType === 'Оператор' ? 'is-operator' : 'is-client' },
-        h('div', { class: 'timeline__head' }, h('span', {}, `${e.actorName} · ${eventLine(e)}`), h('time', { datetime: e.occurredAt }, formatTime(e.occurredAt))),
-        e.message && h('p', { class: 'timeline__msg' }, e.message)))),
-    h('div', { class: 'card' }, form),
+    h('a', { class: 'back', href: '#/' }, icon('back', 16), 'Моите заявки'),
+    pageHead(r.service, r.serviceCategory, statusPill(r.requestStatus)),
+    h('div', { class: 'split' },
+      h('div', { class: 'stack' },
+        h('div', { class: 'card stack' }, tracker(r.requestStatus), h('p', { class: 'pre' }, r.details)),
+        h('section', { class: 'stack', 'aria-labelledby': 'history-title' },
+          h('h2', { id: 'history-title' }, 'Разговор и история'),
+          h('ol', { class: 'timeline' }, events.map((e) =>
+            h('li', { class: e.actorType === 'Оператор' ? 'is-operator' : 'is-client' },
+              h('div', { class: 'timeline__head' }, h('span', {}, `${e.actorName} · ${eventLine(e)}`), h('time', { datetime: e.occurredAt, title: formatTime(e.occurredAt) }, timeAgo(e.occurredAt))),
+              e.message && h('p', { class: 'timeline__msg' }, e.message))))),
+        h('div', { class: 'card' }, form)),
+      h('aside', { class: 'stack side-sticky' },
+        h('div', { class: 'card' },
+          h('h2', { class: 'card__title' }, 'За заявката'),
+          h('dl', { class: 'details details--stacked' },
+            h('dt', {}, 'Номер'), h('dd', { class: 'row-tight' }, r.id, copyButton(r.id, 'Копирайте номера')),
+            h('dt', {}, 'Подадена'), h('dd', {}, formatTime(r.createdAt)),
+            h('dt', {}, 'Последна промяна'), h('dd', {}, timeAgo(r.updatedAt || r.createdAt)))),
+        h('div', { class: 'card card--tint' },
+          h('h2', { class: 'card__title' }, 'Имате въпрос?'),
+          h('p', { class: 'small muted' }, 'Пишете ни тук или на ', h('a', { href: 'mailto:call@buladmin.eu' }, 'call@buladmin.eu'), '.')))),
   );
 }
 
 async function viewProfile() {
-  page(h('div', { class: 'loading' }, 'Зареждане…'));
+  loading();
   const { changes } = await api('/profile/changes');
   const c = state.client;
   const pending = changes.find((x) => x.changeStatus === 'Чака');
@@ -181,11 +285,9 @@ async function viewProfile() {
       const { client, pendingApproval } = await api('/profile', { method: 'PATCH', body: formValues(form) });
       state.client = client;
       showFieldErrors(form, {});
-      if (pendingApproval) {
-        await viewProfile();
-        return;
-      }
-      alert.replaceChildren(h('div', { class: 'alert alert--ok', role: 'status' }, 'Данните са запазени.'));
+      toast(pendingApproval ? 'Изпратихме промяната за одобрение.' : 'Данните са запазени.');
+      await viewProfile();
+      return;
     } catch (err) {
       showFieldErrors(form, err.fields);
       showError(alert, err.message);
@@ -194,26 +296,19 @@ async function viewProfile() {
   });
 
   page(
-    h('a', { class: 'back', href: '#/' }, '← Моите заявки'),
-    h('h1', {}, 'Моите данни'),
-    pending && h('div', { class: 'alert alert--warn', role: 'status' },
-      `Чака одобрение от оператор: ${pending.changedFields}. Дотогава важат старите данни.`),
-    lastRejected && h('div', { class: 'alert alert--error' },
-      `Отказана промяна (${lastRejected.changedFields}). Причина: ${lastRejected.reason}`),
-    h('div', { class: 'card' },
-      h('dl', { class: 'details' },
-        h('dt', {}, 'Вид лице'), h('dd', {}, c.personType),
-        !isCompany(c) && c.egnMasked && [h('dt', {}, 'ЕГН/ЛНЧ'), h('dd', {}, c.egnMasked)],
-        isCompany(c) && c.representativeEgnMasked && [h('dt', {}, 'ЕГН/ЛНЧ на представляващия'), h('dd', {}, c.representativeEgnMasked)],
-        h('dt', {}, 'Вход чрез'), h('dd', {}, loginLabel(c)))),
-    h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Редакция на данните'), form),
-    state.me.security && securityCards(state.me.security),
-    h('p', { class: 'small' }, h('a', { href: '#/privacy' }, 'Искания за лични данни (ЗЗЛД и GDPR)')),
+    pageHead('Моите данни', `${c.personType} · вход чрез ${loginLabel(c)}`),
+    pending && h('div', { class: 'alert alert--warn banner', role: 'status' }, icon('clock'),
+      h('div', { class: 'banner__text' }, h('strong', {}, 'Чака одобрение от оператор'), h('p', {}, `${pending.changedFields}. Дотогава важат старите данни.`))),
+    lastRejected && h('div', { class: 'alert alert--error banner' }, icon('alert'),
+      h('div', { class: 'banner__text' }, h('strong', {}, 'Промяната е отказана'), h('p', {}, `${lastRejected.changedFields}. Причина: ${lastRejected.reason}`))),
+    h('div', { class: 'stack narrow' },
+      h('div', { class: 'card' }, h('h2', { class: 'card__title' }, 'Лични данни и контакт'), form),
+      state.me.security && securityCards(state.me.security)),
   );
 }
 
 async function viewPrivacy() {
-  page(h('div', { class: 'loading' }, 'Зареждане…'));
+  loading();
   const { requests } = await api('/privacy-requests');
   const { privacyRights, dpoEmail } = state.meta;
   const alert = h('div', { 'aria-live': 'polite' });
@@ -235,6 +330,7 @@ async function viewPrivacy() {
     submit.disabled = true;
     try {
       await api('/privacy-requests', { method: 'POST', body: formValues(form) });
+      toast('Искането е изпратено.');
       await viewPrivacy();
     } catch (err) {
       showFieldErrors(form, err.fields);
@@ -243,20 +339,29 @@ async function viewPrivacy() {
     }
   });
   page(
-    h('a', { class: 'back', href: '#/' }, '← Моите заявки'),
-    h('h1', {}, 'Искания за лични данни'),
-    h('p', { class: 'muted' },
-      'Тук упражнявате правата си по Регламент (ЕС) 2016/679 и Закона за защита на личните данни. Отговаряме до един месец. Длъжностно лице по защита на данните: ',
-      h('a', { href: `mailto:${dpoEmail}` }, dpoEmail), '.'),
-    requests.length > 0 && h('div', { class: 'req-list' }, requests.map((p) =>
-      h('div', { class: 'req-item' },
-        h('div', { class: 'req-item__top' },
-          h('span', { class: 'req-item__title' }, p.rightType),
-          h('span', { class: 'pill', 'data-privacy': p.privacyStatus }, p.privacyStatus)),
-        h('div', { class: 'req-item__meta' }, `№ ${p.id} · подадено на ${formatDate(p.createdAt)} · срок до ${formatDate(p.dueAt)}`),
-        p.details && h('p', { class: 'pre small', style: 'margin-top:8px' }, p.details),
-        p.response && h('div', { class: 'alert alert--ok', style: 'margin-top:8px' }, h('strong', {}, 'Отговор: '), p.response)))),
-    h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Ново искане'), form),
+    pageHead('Лични данни', 'Упражнете правата си по Регламент (ЕС) 2016/679 и Закона за защита на личните данни.'),
+    h('div', { class: 'split' },
+      h('div', { class: 'stack' },
+        requests.length > 0
+          ? h('div', { class: 'stack-tight' }, requests.map((p) =>
+              h('article', { class: 'card card--compact' },
+                h('div', { class: 'req-card__top' },
+                  h('strong', {}, p.rightType),
+                  h('span', { class: 'pill', 'data-privacy': p.privacyStatus }, p.privacyStatus)),
+                h('p', { class: 'small muted' }, `№ ${p.id} · подадено на ${formatDate(p.createdAt)} · срок до ${formatDate(p.dueAt)}`),
+                p.details && h('p', { class: 'pre small', style: 'margin-top:8px' }, p.details),
+                p.response && h('div', { class: 'alert alert--ok', style: 'margin-top:10px' }, h('strong', {}, 'Отговор: '), p.response))))
+          : emptyState('shield', 'Нямате подадени искания', 'Можете да поискате достъп до данните си, поправка, изтриване и други.'),
+        h('div', { class: 'card' }, h('h2', { class: 'card__title' }, 'Ново искане'), form)),
+      h('aside', { class: 'stack side-sticky' },
+        h('div', { class: 'card card--tint' },
+          h('h2', { class: 'card__title' }, 'Как работи'),
+          h('ul', { class: 'bullets small' },
+            h('li', {}, 'Отговаряме до един месец.'),
+            h('li', {}, 'При сложни искания срокът може да се удължи с два месеца и ще Ви уведомим.'),
+            h('li', {}, 'Отговорът се вижда тук и получавате известие по имейл.')),
+          h('p', { class: 'small', style: 'margin-top:12px' }, 'Длъжностно лице по защита на данните: ', h('a', { href: `mailto:${dpoEmail}` }, dpoEmail), '.'),
+          h('p', { class: 'small', style: 'margin-top:6px' }, h('a', { href: '/privacy.html' }, 'Политика за лични данни'))))),
   );
 }
 
@@ -268,7 +373,7 @@ async function route() {
     else if (hash === '/new') viewNew();
     else if (hash === '/profile') await viewProfile();
     else if (hash === '/privacy') await viewPrivacy();
-    else await viewList();
+    else await viewHome();
   } catch (err) {
     if (err.status === 401) return location.replace('/');
     fatal(main, err);
@@ -282,7 +387,17 @@ async function init() {
   if (!me.client) return location.replace('/register.html');
   const meta = await api('/meta');
   state = { me, meta, client: me.client };
-  main = mount({ user: clientName(me.client) });
+  const shell = mountShell({
+    user: clientName(me.client),
+    detail: me.client.contactEmail,
+    nav: () => [
+      { key: 'home', href: '#/', label: 'Заявки', icon: 'inbox', match: /^\/(r\/.*)?$/ },
+      { key: 'new', href: '#/new', label: 'Нова заявка', icon: 'plus', match: /^\/new$/ },
+      { key: 'profile', href: '#/profile', label: 'Моите данни', icon: 'user', match: /^\/profile$/ },
+      { key: 'privacy', href: '#/privacy', label: 'Лични данни', icon: 'shield', match: /^\/privacy$/ },
+    ],
+  });
+  main = shell.main;
   window.addEventListener('hashchange', route);
   await route();
 }

@@ -1,104 +1,404 @@
 import {
-  api, contactFields, fatal, formatDate, formatTime, formValues, h, identityFields, linkBox, loginLabel, mount, securityCards, showError,
-  showFieldErrors, statusPill,
+  api, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatTime, formValues, h, icon, identityFields, linkBox, loginLabel,
+  mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, statusPill, timeAgo, toast,
 } from './core.js';
 
-// Показва резултата от изпратен линк: имейл или ръчно предаване, ако имейлът не е излязъл.
-function showDelivery(box, result, note) {
-  box.replaceChildren(result.emailed
-    ? h('div', { class: 'alert alert--ok', role: 'status' }, `Изпратихме имейл с линка до ${result.to}.`)
-    : linkBox(result.link, note));
-  window.scrollTo(0, 0);
-}
-
+let shell;
 let main;
 let meta;
 let me;
 let data;
-const filters = { status: '', category: '', owner: '', q: '' };
 
-function page(...children) {
-  main.replaceChildren(h('div', { class: 'wrap section' }, children));
-}
-
+const PAGE_SIZE = 25;
 const PRIVACY_CLOSED = ['Изпълнено', 'Отказано'];
-const openPrivacy = () => (data?.privacy || []).filter((p) => !PRIVACY_CLOSED.includes(p.privacyStatus)).length;
+const ACTIVE_STATUSES = ['Нова', 'Уточняване', 'Подготвена', 'Подадена', 'Проследява се'];
+const FLOW = ['Нова', 'Уточняване', 'Подготвена', 'Подадена', 'Проследява се', 'Получена'];
+const DUE_SOON_DAYS = 7;
+const filters = { status: '', category: '', owner: '', q: '', page: 1, sort: 'createdAt', dir: -1 };
 
-const tabs = (current) => h('nav', { class: 'tabs', 'aria-label': 'Раздели' },
-  h('a', { href: '#/', 'aria-current': current === 'requests' ? 'page' : null }, 'Заявки'),
-  h('a', { href: '#/clients', 'aria-current': current === 'clients' ? 'page' : null }, 'Клиенти'),
-  h('a', { href: '#/changes', 'aria-current': current === 'changes' ? 'page' : null }, `Промени${data?.changes?.length ? ` (${data.changes.length})` : ''}`),
-  data?.privacy && h('a', { href: '#/privacy', 'aria-current': current === 'privacy' ? 'page' : null }, `Лични данни${openPrivacy() ? ` (${openPrivacy()})` : ''}`),
-  data?.team && h('a', { href: '#/operators', 'aria-current': current === 'operators' ? 'page' : null }, 'Оператори'),
-  h('a', { href: '#/me', 'aria-current': current === 'me' ? 'page' : null }, 'Моят акаунт'));
-
+const isAdmin = () => me.operator.role === 'Администратор';
 const operatorName = (email) => data.operators.find((o) => o.email === email)?.name || email;
 const norm = (s) => String(s || '').toLocaleLowerCase('bg');
+const fullName = (c) => c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ');
+const openPrivacy = () => (data?.privacy || []).filter((p) => !PRIVACY_CLOSED.includes(p.privacyStatus));
+const isOverdue = (p) => !PRIVACY_CLOSED.includes(p.privacyStatus) && Date.parse(p.dueAt) < Date.now();
+const daysLeft = (iso) => Math.ceil((Date.parse(iso) - Date.now()) / 864e5);
+
+function page(...children) {
+  main.replaceChildren(h('div', { class: 'page page--wide' }, children));
+  main.focus({ preventScroll: true });
+}
+const loading = () => main.replaceChildren(h('div', { class: 'loading' }, 'Зареждане…'));
+
+function syncBadges() {
+  shell.setBadges({
+    requests: data.requests.filter((r) => r.requestStatus === 'Нова').length,
+    changes: data.changes.length,
+    privacy: openPrivacy().length,
+  });
+}
+async function refresh() {
+  data = await api('/admin/overview');
+  syncBadges();
+}
+
+// Показва резултата от изпратен линк: имейл или ръчно предаване, ако имейлът не е излязъл.
+function showDelivery(box, result, note) {
+  if (result.emailed) {
+    box.replaceChildren();
+    toast(`Изпратихме имейл с линка до ${result.to}.`);
+    return;
+  }
+  box.replaceChildren(linkBox(result.link, note));
+  window.scrollTo(0, 0);
+}
+
+// --- Табло ---
+
+function kpi(iconName, label, value, href, tone = '') {
+  return h('a', { class: `kpi ${tone}`, href },
+    h('span', { class: 'kpi__icon' }, icon(iconName, 20)),
+    h('span', { class: 'kpi__value' }, String(value)),
+    h('span', { class: 'kpi__label' }, label));
+}
+
+const compactRow = (r) => h('a', { class: 'compact-row', href: `#/r/${r.id}` },
+  h('span', { class: 'compact-row__main' },
+    h('strong', {}, r.service),
+    h('span', { class: 'small muted' }, `${r.clientName} · ${timeAgo(r.createdAt)}`)),
+  statusPill(r.requestStatus));
+
+function viewDashboard() {
+  const mine = data.requests.filter((r) => r.assignedTo === me.operator.email && ACTIVE_STATUSES.includes(r.requestStatus));
+  const fresh = data.requests.filter((r) => r.requestStatus === 'Нова');
+  const unassigned = data.requests.filter((r) => !r.assignedTo && ACTIVE_STATUSES.includes(r.requestStatus));
+  const privacy = openPrivacy();
+  const overdue = privacy.filter(isOverdue);
+  const dueSoon = privacy.filter((p) => !isOverdue(p) && daysLeft(p.dueAt) <= DUE_SOON_DAYS);
+
+  const panel = (title, href, rows, emptyText) => h('section', { class: 'card card--list' },
+    h('div', { class: 'card__head' }, h('h2', {}, title), h('a', { class: 'small', href }, 'Всички')),
+    rows.length ? h('div', { class: 'compact-list' }, rows.slice(0, 6).map(compactRow)) : h('p', { class: 'muted small card__empty' }, emptyText));
+
+  page(
+    pageHead(`Здравейте, ${me.operator.name}`, 'Какво чака действие от Вас днес.'),
+    overdue.length > 0 && h('a', { class: 'alert alert--error banner banner--link', href: '#/privacy' }, icon('alert'),
+      h('div', { class: 'banner__text' },
+        h('strong', {}, `Просрочени искания за лични данни: ${overdue.length}`),
+        h('p', {}, 'Законовият срок е изтекъл. Обработете ги с предимство.'))),
+    h('div', { class: 'kpis' },
+      kpi('inbox', 'Нови заявки', fresh.length, '#/requests?status=Нова', fresh.length ? 'kpi--accent' : ''),
+      kpi('alert', 'Без отговорник', unassigned.length, '#/requests?owner=none', unassigned.length ? 'kpi--warn' : ''),
+      kpi('user', 'Възложени на мен', mine.length, '#/requests?owner=me'),
+      kpi('check', 'Чакат одобрение', data.changes.length, '#/changes', data.changes.length ? 'kpi--warn' : ''),
+      data.privacy && kpi('shield', 'Искания за лични данни', privacy.length, '#/privacy', overdue.length ? 'kpi--danger' : dueSoon.length ? 'kpi--warn' : '')),
+    h('div', { class: 'grid-2' },
+      panel('Нови заявки', '#/requests?status=Нова', fresh, 'Няма нови заявки.'),
+      panel('Моите заявки', '#/requests?owner=me', mine, 'Няма възложени на Вас активни заявки.')),
+  );
+}
+
+// --- Заявки ---
 
 function matches(r) {
   if (filters.status && r.requestStatus !== filters.status) return false;
   if (filters.category && r.serviceCategory !== filters.category) return false;
-  if (filters.owner === '__none' && r.assignedTo) return false;
-  if (filters.owner && filters.owner !== '__none' && r.assignedTo !== filters.owner) return false;
-  if (filters.q) {
-    const hay = norm(`${r.id} ${r.clientName} ${r.service} ${r.serviceCategory} ${r.details}`);
-    if (!hay.includes(norm(filters.q))) return false;
-  }
+  if (filters.owner === 'none' && r.assignedTo) return false;
+  if (filters.owner === 'me' && r.assignedTo !== me.operator.email) return false;
+  if (filters.owner && !['none', 'me'].includes(filters.owner) && r.assignedTo !== filters.owner) return false;
+  if (filters.q && !norm(`${r.id} ${r.clientName} ${r.service} ${r.serviceCategory} ${r.details}`).includes(norm(filters.q))) return false;
   return true;
 }
 
-function requestsTable(rows) {
-  if (!rows.length) return h('div', { class: 'empty' }, data.requests.length ? 'Няма заявки по тези филтри.' : 'Още няма подадени заявки.');
-  return h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['Номер', 'Клиент', 'Услуга', 'Статус', 'Отговорен', 'Подадена'].map((t) => h('th', { scope: 'col' }, t)))),
-    h('tbody', {}, rows.map((r) => h('tr', {
-      'data-href': `#/r/${r.id}`,
-      onclick: (event) => { if (event.target.tagName !== 'A') location.hash = `#/r/${r.id}`; },
-    },
-      h('td', {}, h('a', { href: `#/r/${r.id}` }, r.id)),
-      h('td', { 'data-label': 'Клиент' }, r.clientName, h('div', { class: 'small muted' }, r.personType)),
-      h('td', { 'data-label': 'Услуга' }, r.service, h('div', { class: 'small muted' }, r.serviceCategory)),
-      h('td', {}, statusPill(r.requestStatus)),
-      h('td', { 'data-label': 'Отговорен' }, r.assignedTo ? operatorName(r.assignedTo) : h('span', { class: 'muted' }, 'няма')),
-      h('td', { 'data-label': 'Подадена' }, formatDate(r.createdAt)))))));
+function sortedRows(rows) {
+  const key = filters.sort;
+  return [...rows].sort((a, b) => String(a[key] || '').localeCompare(String(b[key] || ''), 'bg') * filters.dir);
 }
 
-function viewRequests() {
+function viewRequests(query) {
+  if (query) {
+    filters.status = query.get('status') || '';
+    filters.owner = query.get('owner') || '';
+    filters.category = '';
+    filters.q = '';
+    filters.page = 1;
+  }
   const results = h('div', {});
-  const statsBox = h('div', { class: 'stats', role: 'group', 'aria-label': 'Филтър по статус' });
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Филтър по статус' });
 
-  const renderResults = () => {
-    const rows = data.requests.filter(matches);
-    results.replaceChildren(requestsTable(rows));
-    statsBox.replaceChildren(
-      statButton('', 'Всички', data.requests.length),
-      ...meta.statuses.map((s) => statButton(s, s, data.requests.filter((r) => r.requestStatus === s).length)));
-  };
-  const statButton = (value, label, count) => h('button', {
-    class: 'stat', type: 'button', 'aria-pressed': String(filters.status === value),
-    onclick: () => { filters.status = value; renderResults(); },
-  }, h('b', {}, String(count)), h('span', {}, label));
+  const header = (label, key) => h('th', { scope: 'col', 'aria-sort': filters.sort === key ? (filters.dir > 0 ? 'ascending' : 'descending') : null },
+    h('button', {
+      class: 'th-btn', type: 'button',
+      onclick: () => {
+        if (filters.sort === key) filters.dir *= -1;
+        else {
+          filters.sort = key;
+          filters.dir = key === 'createdAt' ? -1 : 1;
+        }
+        render();
+      },
+    }, label, filters.sort === key && h('span', { 'aria-hidden': 'true' }, filters.dir > 0 ? ' ↑' : ' ↓')));
+
+  function render() {
+    const rows = sortedRows(data.requests.filter(matches));
+    const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    filters.page = Math.min(filters.page, pages);
+    const visible = rows.slice((filters.page - 1) * PAGE_SIZE, filters.page * PAGE_SIZE);
+
+    chips.replaceChildren(
+      ...[['', 'Всички', data.requests.length], ...meta.statuses.map((s) => [s, s, data.requests.filter((r) => r.requestStatus === s).length])].map(([value, label, count]) =>
+        h('button', {
+          class: 'chip', type: 'button', 'aria-pressed': String(filters.status === value),
+          onclick: () => {
+            filters.status = value;
+            filters.page = 1;
+            render();
+          },
+        }, label, h('span', { class: 'chip__count' }, String(count)))));
+
+    if (!rows.length) {
+      results.replaceChildren(data.requests.length
+        ? emptyState('search', 'Няма заявки по тези филтри', 'Променете филтрите или изчистете търсенето.')
+        : emptyState('inbox', 'Още няма подадени заявки', 'Новите заявки ще се появяват тук.'));
+      return;
+    }
+    results.replaceChildren(
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {},
+          h('th', { scope: 'col' }, 'Номер'),
+          header('Клиент', 'clientName'),
+          header('Услуга', 'service'),
+          header('Статус', 'requestStatus'),
+          header('Отговорен', 'assignedTo'),
+          header('Подадена', 'createdAt'))),
+        h('tbody', {}, visible.map((r) => h('tr', {
+          'data-href': `#/r/${r.id}`,
+          onclick: (event) => {
+            if (event.target.closest('a,button')) return;
+            location.hash = `#/r/${r.id}`;
+          },
+        },
+          h('td', {}, h('a', { href: `#/r/${r.id}` }, r.id)),
+          h('td', { 'data-label': 'Клиент' }, r.clientName, h('div', { class: 'small muted' }, r.personType)),
+          h('td', { 'data-label': 'Услуга' }, r.service, h('div', { class: 'small muted' }, r.serviceCategory)),
+          h('td', {}, statusPill(r.requestStatus)),
+          h('td', { 'data-label': 'Отговорен' }, r.assignedTo ? operatorName(r.assignedTo) : h('span', { class: 'muted' }, 'няма')),
+          h('td', { 'data-label': 'Подадена', title: formatTime(r.createdAt) }, timeAgo(r.createdAt))))))),
+      pages > 1 && h('nav', { class: 'pager', 'aria-label': 'Страници' },
+        h('button', { class: 'btn btn--ghost btn--small', type: 'button', disabled: filters.page === 1, onclick: () => { filters.page -= 1; render(); window.scrollTo(0, 0); } }, 'Предишна'),
+        h('span', { class: 'small muted' }, `Страница ${filters.page} от ${pages} · ${rows.length} заявки`),
+        h('button', { class: 'btn btn--ghost btn--small', type: 'button', disabled: filters.page === pages, onclick: () => { filters.page += 1; render(); window.scrollTo(0, 0); } }, 'Следваща')),
+    );
+  }
 
   const search = h('input', {
-    type: 'search', value: filters.q, placeholder: 'Търсене по номер, клиент, услуга…', 'aria-label': 'Търсене',
-    oninput: () => { filters.q = search.value; renderResults(); },
+    type: 'search', value: filters.q, placeholder: 'Търсене по номер, клиент или услуга', 'aria-label': 'Търсене',
+    oninput: () => {
+      filters.q = search.value;
+      filters.page = 1;
+      render();
+    },
   });
   const category = h('select', {
-    'aria-label': 'Категория', onchange: () => { filters.category = category.value; renderResults(); },
+    'aria-label': 'Категория',
+    onchange: () => {
+      filters.category = category.value;
+      filters.page = 1;
+      render();
+    },
   }, h('option', { value: '' }, 'Всички категории'), meta.catalog.map((c) => h('option', { value: c.name, selected: filters.category === c.name }, c.name)));
   const owner = h('select', {
-    'aria-label': 'Отговорен', onchange: () => { filters.owner = owner.value; renderResults(); },
+    'aria-label': 'Отговорен',
+    onchange: () => {
+      filters.owner = owner.value;
+      filters.page = 1;
+      render();
+    },
   },
     h('option', { value: '' }, 'Всички оператори'),
-    h('option', { value: '__none', selected: filters.owner === '__none' }, 'Без отговорник'),
-    data.operators.map((o) => h('option', { value: o.email, selected: filters.owner === o.email }, o.email === me.operator.email ? `${o.name} (аз)` : o.name)));
+    h('option', { value: 'me', selected: filters.owner === 'me' }, 'Възложени на мен'),
+    h('option', { value: 'none', selected: filters.owner === 'none' }, 'Без отговорник'),
+    data.operators.filter((o) => o.email !== me.operator.email).map((o) => h('option', { value: o.email, selected: filters.owner === o.email }, o.name)));
 
-  page(tabs('requests'), statsBox, h('div', { class: 'filters' }, search, category, owner), results);
-  renderResults();
+  page(
+    pageHead('Заявки', `${data.requests.length} общо`),
+    chips,
+    h('div', { class: 'filters' }, h('div', { class: 'search' }, icon('search', 18), search), category, owner),
+    results,
+  );
+  render();
+}
+
+function eventLine(e) {
+  if (e.fromStatus || e.toStatus) return `${e.action}: ${[e.fromStatus, e.toStatus].filter(Boolean).join(' → ')}`;
+  return e.action;
+}
+
+function clientCard(c) {
+  if (!c) return h('p', { class: 'muted' }, 'Няма данни за клиента.');
+  const company = !!c.companyName;
+  return h('dl', { class: 'details details--stacked' },
+    h('dt', {}, c.personType), h('dd', {}, h('a', { href: `#/c/${c.id}` }, fullName(c))),
+    !company && c.egnMasked && [h('dt', {}, 'ЕГН/ЛНЧ'), h('dd', {}, c.egnMasked)],
+    company && c.representativeEgnMasked && [h('dt', {}, 'ЕГН/ЛНЧ на представляващия'), h('dd', {}, c.representativeEgnMasked)],
+    company && [h('dt', {}, 'ЕИК'), h('dd', { class: 'row-tight' }, c.eik, copyButton(c.eik, 'Копирайте ЕИК'))],
+    company && c.vatNumber && [h('dt', {}, 'ДДС'), h('dd', {}, c.vatNumber)],
+    company && [h('dt', {}, 'Представляващ'), h('dd', {}, [c.representative, c.representativeRole].filter(Boolean).join(', '))],
+    company && c.contactPerson && [h('dt', {}, 'Лице за контакт'), h('dd', {}, c.contactPerson)],
+    h('dt', {}, 'Телефон'), h('dd', { class: 'row-tight' }, h('a', { href: `tel:${c.phone.replace(/[^+\d]/g, '')}` }, c.phone), copyButton(c.phone, 'Копирайте телефона')),
+    h('dt', {}, 'Имейл'), h('dd', { class: 'row-tight' }, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail), copyButton(c.contactEmail, 'Копирайте имейла')),
+    h('dt', {}, 'Адрес'), h('dd', {}, `${c.city}, ${c.address}`),
+    company && c.correspondenceAddress && [h('dt', {}, 'За кореспонденция'), h('dd', {}, c.correspondenceAddress)]);
+}
+
+async function viewRequest(id) {
+  loading();
+  const url = `/admin/requests/${encodeURIComponent(id)}`;
+  const detail = await api(url);
+  const r = detail.request;
+
+  const save = async (patch, message) => {
+    try {
+      await api(url, { method: 'PATCH', body: patch });
+      toast(message);
+      await refresh();
+      await viewRequest(id);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  const nextStatus = FLOW[FLOW.indexOf(r.requestStatus) + 1];
+  const status = h('select', {
+    id: 'f-status',
+    onchange: async () => {
+      if (status.value === 'Отказана') {
+        const yes = await confirmDialog({
+          title: 'Отказ на заявката', text: 'Клиентът ще получи известие, че заявката е отказана. Обяснете причината със съобщение.', confirmLabel: 'Откажете заявката', danger: true,
+        });
+        if (!yes) {
+          status.value = r.requestStatus;
+          return;
+        }
+      }
+      await save({ requestStatus: status.value }, `Статусът е променен на „${status.value}“.`);
+    },
+  }, meta.statuses.map((s) => h('option', { value: s, selected: s === r.requestStatus }, s)));
+  const assigned = h('select', {
+    id: 'f-assigned',
+    onchange: () => save({ assignedTo: assigned.value }, assigned.value ? `Възложена на ${operatorName(assigned.value)}.` : 'Отговорникът е премахнат.'),
+  },
+    h('option', { value: '' }, 'Без отговорник'),
+    data.operators.map((o) => h('option', { value: o.email, selected: o.email === r.assignedTo }, o.name)));
+
+  const msgAlert = h('div', { 'aria-live': 'polite' });
+  const send = h('button', { class: 'btn', type: 'submit' }, 'Добавете бележката');
+  const textarea = h('textarea', { id: 'f-message', name: 'message', maxlength: 2000, placeholder: 'Вижда се само от оператори' });
+  const setAudience = (client) => {
+    send.textContent = client ? 'Изпратете на клиента' : 'Добавете бележката';
+    textarea.placeholder = client ? 'Клиентът ще го види в портала и ще получи известие' : 'Вижда се само от оператори';
+    form.classList.toggle('composer--client', client);
+  };
+  const form = h('form', { class: 'composer', novalidate: true },
+    h('fieldset', { class: 'segmented-field' },
+      h('legend', { class: 'sr-only' }, 'Вид съобщение'),
+      h('div', { class: 'segmented' },
+        h('label', {}, h('input', { type: 'radio', name: 'audience', value: 'internal', checked: true, onchange: () => setAudience(false) }), h('span', {}, 'Вътрешна бележка')),
+        h('label', {}, h('input', { type: 'radio', name: 'audience', value: 'client', onchange: () => setAudience(true) }), h('span', {}, 'До клиента')))),
+    h('div', { class: 'field' }, h('label', { for: 'f-message', class: 'sr-only' }, 'Текст'), textarea),
+    msgAlert,
+    h('div', { class: 'composer__actions' }, h('span', { class: 'small muted' }, 'Ctrl + Enter за изпращане'), send));
+  textarea.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) form.requestSubmit();
+  });
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    send.disabled = true;
+    const { message, audience } = formValues(form);
+    try {
+      await api(`${url}/messages`, { method: 'POST', body: { message, internal: audience !== 'client' } });
+      toast(audience === 'client' ? 'Съобщението е изпратено на клиента.' : 'Бележката е добавена.');
+      await viewRequest(id);
+    } catch (err) {
+      showFieldErrors(form, err.fields);
+      showError(msgAlert, err.message);
+      send.disabled = false;
+    }
+  });
+
+  page(
+    h('a', { class: 'back', href: '#/requests' }, icon('back', 16), 'Всички заявки'),
+    pageHead(r.service, `${r.serviceCategory} · подадена ${timeAgo(r.createdAt)}`, statusPill(r.requestStatus)),
+    h('div', { class: 'split' },
+      h('div', { class: 'stack' },
+        h('div', { class: 'card stack' },
+          progress(r.requestStatus),
+          h('h2', { class: 'card__title' }, 'Описание от клиента'),
+          h('p', { class: 'pre' }, r.details)),
+        h('section', { class: 'stack', 'aria-labelledby': 'history-title' },
+          h('h2', { id: 'history-title' }, 'История'),
+          h('ol', { class: 'timeline' }, detail.events.map((e) =>
+            h('li', { class: e.visibility === 'Вътрешно' ? 'is-internal' : e.actorType === 'Оператор' ? 'is-operator' : 'is-client' },
+              h('div', { class: 'timeline__head' },
+                h('span', {}, `${e.actorName} · ${eventLine(e)}`, e.visibility === 'Вътрешно' ? ' · само за оператори' : ''),
+                h('time', { datetime: e.occurredAt, title: formatTime(e.occurredAt) }, timeAgo(e.occurredAt))),
+              e.message && h('p', { class: 'timeline__msg' }, e.message))))),
+        h('div', { class: 'card' }, form)),
+      h('aside', { class: 'stack side-sticky' },
+        h('div', { class: 'card form' },
+          h('h2', { class: 'card__title' }, 'Обработка'),
+          nextStatus && h('button', { class: 'btn btn--wide', type: 'button', onclick: () => save({ requestStatus: nextStatus }, `Статусът е променен на „${nextStatus}“.`) }, 'Следващ етап: ', nextStatus, icon('arrow', 18)),
+          !r.assignedTo && h('button', { class: 'btn btn--ghost btn--wide', type: 'button', onclick: () => save({ assignedTo: me.operator.email }, 'Поехте заявката.') }, 'Поемам я'),
+          h('div', { class: 'field' }, h('label', { for: 'f-status' }, 'Статус'), status),
+          h('div', { class: 'field' }, h('label', { for: 'f-assigned' }, 'Отговорен оператор'), assigned),
+          h('p', { class: 'small muted row-tight' }, `№ ${r.id}`, copyButton(r.id, 'Копирайте номера'))),
+        h('div', { class: 'card' }, h('h2', { class: 'card__title' }, 'Клиент'), clientCard(detail.client)))),
+  );
+}
+
+// --- Клиенти ---
+
+function viewClients() {
+  const results = h('div', {});
+  let query = '';
+  const counts = Object.create(null);
+  for (const r of data.requests) counts[r.clientId] = (counts[r.clientId] || 0) + 1;
+  const render = () => {
+    const q = norm(query);
+    const rows = data.clients.filter((c) => !q || norm(`${c.companyName} ${c.firstName} ${c.lastName} ${c.eik} ${c.phone} ${c.contactEmail} ${c.city}`).includes(q));
+    results.replaceChildren(rows.length
+      ? h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, ['Клиент', 'Вид', 'ЕИК', 'Контакт', 'Заявки', 'Регистриран'].map((t) => h('th', { scope: 'col' }, t)))),
+          h('tbody', {}, rows.map((c) => h('tr', {
+            'data-href': `#/c/${c.id}`,
+            onclick: (event) => {
+              if (event.target.closest('a,button')) return;
+              location.hash = `#/c/${c.id}`;
+            },
+          },
+            h('td', {}, h('a', { href: `#/c/${c.id}` }, fullName(c)), h('div', { class: 'small muted' }, c.city)),
+            h('td', { 'data-label': 'Вид' }, c.personType),
+            h('td', { 'data-label': 'ЕИК' }, c.eik || '–'),
+            h('td', { 'data-label': 'Контакт' }, c.phone, h('div', { class: 'small' }, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail))),
+            h('td', { 'data-label': 'Заявки' }, String(counts[c.id] || 0)),
+            h('td', { 'data-label': 'Регистриран', title: formatTime(c.createdAt) }, formatDate(c.createdAt)))))))
+      : data.clients.length
+        ? emptyState('search', 'Няма клиенти по това търсене', 'Търсете по име, ЕИК, телефон или имейл.')
+        : emptyState('users', 'Още няма регистрирани клиенти', 'Новите клиенти ще се появяват тук.'));
+  };
+  const search = h('input', {
+    type: 'search', placeholder: 'Търсене по име, ЕИК, телефон или имейл', 'aria-label': 'Търсене',
+    oninput: () => {
+      query = search.value;
+      render();
+    },
+  });
+  page(pageHead('Клиенти', `${data.clients.length} регистрирани`), h('div', { class: 'search search--full' }, icon('search', 18), search), results);
+  render();
 }
 
 async function viewClient(id) {
-  page(h('div', { class: 'loading' }, 'Зареждане…'));
+  loading();
   const url = `/admin/clients/${encodeURIComponent(id)}`;
   const detail = await api(url);
   const c = detail.client;
@@ -106,7 +406,7 @@ async function viewClient(id) {
 
   // Пълното ЕГН се зарежда само при изрично действие, което остава в историята.
   const maskedIdentity = c.egnMasked || c.representativeEgnMasked;
-  const egnValue = h('span', {}, maskedIdentity);
+  const egnValue = h('span', { class: 'mono' }, maskedIdentity);
   const reveal = maskedIdentity && h('button', {
     class: 'link-btn small', type: 'button',
     onclick: async () => {
@@ -115,7 +415,7 @@ async function viewClient(id) {
         egnValue.textContent = egn || representativeEgn;
         reveal.remove();
       } catch (err) {
-        showError(notice, err.message);
+        toast(err.message, 'error');
       }
     },
   }, 'Покажи');
@@ -134,7 +434,7 @@ async function viewClient(id) {
     h('input', { type: 'radio', name: 'kind', value, checked, onchange: () => applyKind(value) }), h('b', {}, label));
 
   const formAlert = h('div', { 'aria-live': 'polite' });
-  const save = h('button', { class: 'btn', type: 'submit' }, 'Запазете');
+  const save = h('button', { class: 'btn', type: 'submit' }, 'Запазете промените');
   const form = h('form', { class: 'form', novalidate: true },
     h('fieldset', { class: 'field' },
       h('legend', {}, 'Вид лице'),
@@ -153,6 +453,8 @@ async function viewClient(id) {
     save.disabled = true;
     try {
       await api(url, { method: 'PATCH', body: formValues(form) });
+      toast('Данните са запазени.');
+      await refresh();
       await viewClient(id);
       window.scrollTo(0, 0);
     } catch (err) {
@@ -165,30 +467,50 @@ async function viewClient(id) {
   const resetLink = c.provider === 'local' && h('button', {
     class: 'btn btn--ghost btn--small', type: 'button',
     onclick: async () => {
+      const yes = await confirmDialog({
+        title: 'Линк за нова парола', text: `Първо проверете самоличността на клиента. Линкът дава достъп до профила на ${c.loginEmail}.`, confirmLabel: 'Изпратете',
+      });
+      if (!yes) return;
       try {
         const result = await api(`${url}/reset`, { method: 'POST' });
-        showDelivery(notice, result, `Линк за нова парола за ${c.loginEmail}. Първо проверете самоличността на клиента.`);
+        showDelivery(notice, result, `Линк за нова парола за ${c.loginEmail}.`);
       } catch (err) {
-        showError(notice, err.message);
+        toast(err.message, 'error');
       }
     },
-  }, 'Изпратете линк за нова парола');
+  }, 'Линк за нова парола');
 
   page(
-    h('a', { class: 'back', href: '#/clients' }, '← Всички клиенти'),
+    h('a', { class: 'back', href: '#/clients' }, icon('back', 16), 'Всички клиенти'),
+    pageHead(fullName(c), `${c.personType} · регистриран на ${formatDate(c.createdAt)}`),
     notice,
     h('div', { class: 'split' },
       h('div', { class: 'stack' },
-        h('h1', {}, c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')),
-        h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Редакция на данните'), form),
-        h('h2', {}, 'История на промените'),
-        detail.events.length
-          ? h('ol', { class: 'timeline' }, detail.events.map((e) => h('li', { class: 'is-internal' },
-              h('div', { class: 'timeline__head' }, h('span', {}, `${e.actorName} · ${e.action}`), h('time', { datetime: e.occurredAt }, formatTime(e.occurredAt))))))
-          : h('div', { class: 'empty' }, 'Няма записани промени.')),
-      h('aside', { class: 'stack' },
-        data?.team && h('div', { class: 'card stack' },
-          h('h2', {}, 'Искане за достъп'),
+        h('div', { class: 'card' }, h('h2', { class: 'card__title' }, 'Редакция на данните'), form),
+        h('section', { class: 'stack' },
+          h('h2', {}, 'История на промените'),
+          detail.events.length
+            ? h('ol', { class: 'timeline' }, detail.events.map((e) => h('li', { class: 'is-internal' },
+                h('div', { class: 'timeline__head' }, h('span', {}, `${e.actorName} · ${e.action}`), h('time', { datetime: e.occurredAt, title: formatTime(e.occurredAt) }, timeAgo(e.occurredAt))))))
+            : h('p', { class: 'muted small' }, 'Няма записани промени.'))),
+      h('aside', { class: 'stack side-sticky' },
+        maskedIdentity && h('div', { class: 'card' },
+          h('h2', { class: 'card__title' }, c.egnMasked ? 'ЕГН/ЛНЧ' : 'ЕГН/ЛНЧ на представляващия'),
+          h('p', { class: 'row' }, egnValue, reveal),
+          h('p', { class: 'small muted', style: 'margin-top:8px' }, 'Всеки преглед на пълното ЕГН се записва в историята.')),
+        h('div', { class: 'card stack-tight' },
+          h('h2', { class: 'card__title' }, 'Вход в портала'),
+          h('p', { class: 'small' }, loginLabel(c)),
+          resetLink),
+        h('div', { class: 'card card--list' },
+          h('div', { class: 'card__head' }, h('h2', {}, `Заявки (${detail.requests.length})`)),
+          detail.requests.length
+            ? h('div', { class: 'compact-list' }, detail.requests.map((r) => h('a', { class: 'compact-row', href: `#/r/${r.id}` },
+                h('span', { class: 'compact-row__main' }, h('strong', {}, r.service), h('span', { class: 'small muted' }, `№ ${r.id} · ${formatDate(r.createdAt)}`)),
+                statusPill(r.requestStatus))))
+            : h('p', { class: 'muted small card__empty' }, 'Няма заявки.')),
+        data?.team && h('div', { class: 'card stack-tight' },
+          h('h2', { class: 'card__title' }, 'Искане за достъп'),
           h('p', { class: 'small muted' }, 'Изтегля всички данни на лицето, за отговор на искане за достъп или преносимост. Действието се записва.'),
           h('button', {
             class: 'btn btn--ghost btn--small', type: 'button',
@@ -202,46 +524,32 @@ async function viewClient(id) {
                 link.click();
                 URL.revokeObjectURL(link.href);
               } catch (err) {
-                showError(notice, err.message);
+                toast(err.message, 'error');
               }
             },
-          }, 'Изтеглете данните')),
-        maskedIdentity && h('div', { class: 'card' },
-          h('h2', { style: 'margin-bottom:8px' }, c.egnMasked ? 'ЕГН/ЛНЧ' : 'ЕГН/ЛНЧ на представляващия'),
-          h('p', { class: 'row' }, egnValue, reveal),
-          h('p', { class: 'small muted', style: 'margin-top:8px' }, 'Всеки преглед на пълното ЕГН се записва в историята.')),
-        h('div', { class: 'card stack' },
-          h('h2', {}, 'Вход'),
-          h('p', {}, loginLabel(c)),
-          resetLink),
-        h('div', { class: 'card stack' },
-          h('h2', {}, 'Заявки'),
-          detail.requests.length
-            ? h('div', { class: 'req-list' }, detail.requests.map((r) => h('a', { class: 'req-item', href: `#/r/${r.id}` },
-                h('div', { class: 'req-item__top' }, h('span', { class: 'req-item__title' }, r.service), statusPill(r.requestStatus)),
-                h('div', { class: 'req-item__meta' }, `№ ${r.id} · ${formatDate(r.createdAt)}`))))
-            : h('p', { class: 'muted' }, 'Няма заявки.')))),
+          }, 'Изтеглете данните')))),
   );
 }
 
+// --- Промени за одобрение ---
+
 function viewChanges() {
-  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
-  const reload = async () => {
-    data = await api('/admin/overview');
-    viewChanges();
-    window.scrollTo(0, 0);
-  };
   const card = (change) => {
     const toCells = new Map();
-    const reason = h('textarea', { 'aria-label': 'Причина за отказ', maxlength: 1000, placeholder: 'Причина, ако отказвате' });
+    const reason = h('textarea', { 'aria-label': 'Причина за отказ', maxlength: 1000, placeholder: 'Причина за отказ. Клиентът ще я види.' });
     const decide = (decision) => async () => {
-      notice.replaceChildren();
+      if (decision === 'reject' && !reason.value.trim()) {
+        toast('Напишете причина за отказа.', 'error');
+        reason.focus();
+        return;
+      }
       try {
         await api(`/admin/changes/${encodeURIComponent(change.id)}`, { method: 'POST', body: { decision, reason: reason.value } });
-        await reload();
+        toast(decision === 'approve' ? 'Промяната е одобрена.' : 'Промяната е отказана.');
+        await refresh();
+        viewChanges();
       } catch (err) {
-        showError(notice, err.message);
-        window.scrollTo(0, 0);
+        toast(err.message, 'error');
       }
     };
     const reveal = change.hasSensitive && h('button', {
@@ -252,14 +560,14 @@ function viewChanges() {
           for (const [key, value] of Object.entries(values)) toCells.get(key).textContent = value;
           reveal.remove();
         } catch (err) {
-          showError(notice, err.message);
+          toast(err.message, 'error');
         }
       },
     }, 'Покажи предложеното ЕГН');
-    return h('div', { class: 'card stack' },
-      h('div', { class: 'row row--between' },
+    return h('article', { class: 'card stack' },
+      h('div', { class: 'card__head card__head--plain' },
         h('h2', {}, h('a', { href: `#/c/${change.clientId}` }, change.clientName)),
-        h('span', { class: 'small muted' }, formatTime(change.createdAt))),
+        h('span', { class: 'small muted', title: formatTime(change.createdAt) }, timeAgo(change.createdAt))),
       h('div', { class: 'table-wrap' }, h('table', {},
         h('thead', {}, h('tr', {}, ['Поле', 'Сега', 'Предложено'].map((t) => h('th', { scope: 'col' }, t)))),
         h('tbody', {}, change.rows.map((row) => {
@@ -270,100 +578,82 @@ function viewChanges() {
       reveal,
       h('div', { class: 'field' }, reason),
       h('div', { class: 'row' },
-        h('button', { class: 'btn btn--small', type: 'button', onclick: decide('approve') }, 'Одобрете'),
-        h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: decide('reject') }, 'Откажете')));
+        h('button', { class: 'btn', type: 'button', onclick: decide('approve') }, icon('check', 18), 'Одобрете'),
+        h('button', { class: 'btn btn--ghost', type: 'button', onclick: decide('reject') }, 'Откажете')));
   };
-  page(tabs('changes'), notice,
+  page(
+    pageHead('Промени за одобрение', 'Клиентите не могат да променят вече въведени данни без Ваше решение.'),
     data.changes.length
       ? h('div', { class: 'stack' }, data.changes.map(card))
-      : h('div', { class: 'empty' }, 'Няма промени, които чакат одобрение.'));
+      : emptyState('check', 'Няма чакащи промени', 'Всичко е обработено.'),
+  );
 }
 
+// --- Искания за лични данни ---
+
 function viewPrivacyRequests() {
-  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
-  const nowMs = Date.now();
   const card = (p) => {
     const closed = PRIVACY_CLOSED.includes(p.privacyStatus);
-    const overdue = !closed && Date.parse(p.dueAt) < nowMs;
+    const overdue = isOverdue(p);
+    const left = daysLeft(p.dueAt);
     const url = `/admin/privacy-requests/${encodeURIComponent(p.id)}`;
     const response = h('textarea', { 'aria-label': 'Отговор към лицето', value: p.response, maxlength: 4000, placeholder: 'Отговор, който лицето вижда в профила си' });
     const status = h('select', { 'aria-label': 'Статус' }, meta.privacyStatuses.map((s) => h('option', { value: s, selected: s === p.privacyStatus }, s)));
-    const send = async (body) => {
-      notice.replaceChildren();
+    const send = async (body, message) => {
       try {
         await api(url, { method: 'PATCH', body });
-        data = await api('/admin/overview');
+        toast(message);
+        await refresh();
         viewPrivacyRequests();
       } catch (err) {
-        showError(notice, err.message);
+        toast(err.message, 'error');
       }
-      window.scrollTo(0, 0);
     };
-    return h('div', { class: 'card stack' },
-      h('div', { class: 'row row--between' },
+    return h('article', { class: `card stack ${overdue ? 'card--danger' : ''}` },
+      h('div', { class: 'card__head card__head--plain' },
         h('h2', {}, p.rightType),
         h('span', { class: 'pill', 'data-privacy': p.privacyStatus }, p.privacyStatus)),
-      h('p', { class: `small ${overdue ? 'text-error' : 'muted'}` },
-        `№ ${p.id} · подадено ${formatDate(p.createdAt)} · срок до ${formatDate(p.dueAt)}${overdue ? ' · ПРОСРОЧЕНО' : ''}`),
+      !closed && h('p', { class: `deadline ${overdue ? 'deadline--over' : left <= DUE_SOON_DAYS ? 'deadline--soon' : ''}` },
+        icon('clock', 16),
+        overdue ? `Срокът изтече на ${formatDate(p.dueAt)}` : `Остават ${left} дни, до ${formatDate(p.dueAt)}`),
+      h('p', { class: 'small muted' }, `№ ${p.id} · подадено на ${formatDate(p.createdAt)}`),
       h('p', {}, h('a', { href: `#/c/${p.clientId}` }, p.clientName), ` · ${p.contactEmail}`),
       p.details && h('p', { class: 'pre' }, p.details),
       h('div', { class: 'field' }, response),
       h('div', { class: 'row' },
         status,
-        h('button', { class: 'btn btn--small', type: 'button', onclick: () => send({ privacyStatus: status.value, response: response.value }) }, 'Запазете'),
+        h('button', { class: 'btn btn--small', type: 'button', onclick: () => send({ privacyStatus: status.value, response: response.value }, 'Искането е обновено.') }, 'Запазете'),
         !closed && p.privacyStatus !== 'Удължен срок' && h('button', {
-          class: 'btn btn--ghost btn--small', type: 'button', onclick: () => send({ extend: true, response: response.value }),
-        }, 'Удължете срока с 2 месеца')));
+          class: 'btn btn--ghost btn--small', type: 'button',
+          onclick: async () => {
+            const yes = await confirmDialog({
+              title: 'Удължаване на срока', text: 'Срокът става три месеца от подаването. Позволено е само при сложни или многобройни искания, а лицето ще получи известие.', confirmLabel: 'Удължете',
+            });
+            if (yes) await send({ extend: true, response: response.value }, 'Срокът е удължен.');
+          },
+        }, 'Удължете срока')));
   };
-  const active = data.privacy.filter((p) => !PRIVACY_CLOSED.includes(p.privacyStatus));
+  const active = openPrivacy();
   const done = data.privacy.filter((p) => PRIVACY_CLOSED.includes(p.privacyStatus));
-  page(tabs('privacy'), notice,
+  page(
+    pageHead('Искания за лични данни', 'По Регламент (ЕС) 2016/679 и Закона за защита на личните данни. Подредени по срок.'),
     data.privacy.length
       ? h('div', { class: 'stack' }, active.map(card), done.length > 0 && h('h2', {}, 'Приключени'), done.map(card))
-      : h('div', { class: 'empty' }, 'Няма подадени искания за лични данни.'));
+      : emptyState('shield', 'Няма подадени искания', 'Исканията от клиентските профили ще се появяват тук.'),
+  );
 }
 
-function viewClients() {
-  const results = h('div', {});
-  let query = '';
-  const render = () => {
-    const q = norm(query);
-    const rows = data.clients.filter((c) => !q || norm(`${c.companyName} ${c.firstName} ${c.lastName} ${c.eik} ${c.phone} ${c.contactEmail} ${c.city}`).includes(q));
-    const counts = Object.create(null);
-    for (const r of data.requests) counts[r.clientId] = (counts[r.clientId] || 0) + 1;
-    results.replaceChildren(rows.length
-      ? h('div', { class: 'table-wrap' }, h('table', {},
-          h('thead', {}, h('tr', {}, ['Клиент', 'Вид', 'ЕИК', 'Контакт', 'Заявки', 'Регистриран', 'Вход'].map((t) => h('th', { scope: 'col' }, t)))),
-          h('tbody', {}, rows.map((c) => h('tr', {},
-            h('td', {}, h('a', { href: `#/c/${c.id}` }, c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')), h('div', { class: 'small muted' }, c.city)),
-            h('td', { 'data-label': 'Вид' }, c.personType),
-            h('td', { 'data-label': 'ЕИК' }, c.eik || '–'),
-            h('td', { 'data-label': 'Контакт' }, c.phone, h('div', { class: 'small' }, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail))),
-            h('td', { 'data-label': 'Заявки' }, String(counts[c.id] || 0)),
-            h('td', { 'data-label': 'Регистриран' }, formatDate(c.createdAt)),
-            h('td', { 'data-label': 'Вход' }, loginLabel(c)))))))
-      : h('div', { class: 'empty' }, data.clients.length ? 'Няма клиенти по това търсене.' : 'Още няма регистрирани клиенти.'));
-  };
-  const search = h('input', {
-    type: 'search', placeholder: 'Търсене по име, ЕИК, телефон, имейл…', 'aria-label': 'Търсене',
-    oninput: () => { query = search.value; render(); },
-  });
-  page(tabs('clients'), h('div', { class: 'filters', style: 'grid-template-columns:minmax(0,1fr)' }, search), results);
-  render();
-}
+// --- Оператори и личен акаунт ---
 
 function viewMe() {
-  page(tabs('me'), h('div', { class: 'wrap--narrow stack', style: 'padding:0;margin-inline:0' },
-    h('p', { class: 'muted' }, `${me.operator.name} · ${me.operator.email} · ${me.operator.role}`),
-    securityCards(me.security)));
+  page(
+    pageHead('Моят акаунт', `${me.operator.email} · ${me.operator.role}`),
+    h('div', { class: 'stack narrow' }, securityCards(me.security)),
+  );
 }
 
 function viewOperators() {
-  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
-  const refresh = async () => {
-    data = await api('/admin/overview');
-    renderTable();
-  };
+  const notice = h('div', { 'aria-live': 'polite' });
   const tableBox = h('div', {});
 
   function renderTable() {
@@ -378,16 +668,17 @@ function viewOperators() {
             try {
               await fn();
             } catch (err) {
-              showError(notice, err.message);
+              toast(err.message, 'error');
             }
           },
         }, label);
         const url = `/admin/operators/${encodeURIComponent(o.email)}`;
         const linked = [o.google && 'Google', o.microsoft && 'Microsoft'].filter(Boolean).join(', ');
+        const state = o.isActive !== 'Да' ? 'Деактивиран' : o.pendingSetup ? 'Очаква парола' : 'Активен';
         return h('tr', {},
           h('td', {}, h('strong', {}, o.name), h('div', { class: 'small muted' }, o.email)),
           h('td', { 'data-label': 'Роля' }, o.role),
-          h('td', { 'data-label': 'Състояние' }, o.isActive !== 'Да' ? 'Деактивиран' : o.pendingSetup ? 'Очаква парола' : 'Активен'),
+          h('td', { 'data-label': 'Състояние' }, h('span', { class: `dot dot--${o.isActive !== 'Да' ? 'off' : o.pendingSetup ? 'wait' : 'on'}` }), state),
           h('td', { 'data-label': 'Свързан с' }, linked || '–'),
           h('td', {}, isMe ? h('span', { class: 'muted small' }, 'Това сте Вие') : h('div', { class: 'row' },
             act('Линк за парола', async () => {
@@ -395,13 +686,22 @@ function viewOperators() {
               showDelivery(notice, result, `Линк за задаване на парола за ${o.email}.`);
             }),
             act(o.isActive === 'Да' ? 'Деактивирайте' : 'Активирайте', async () => {
-              await api(url, { method: 'PATCH', body: { isActive: o.isActive === 'Да' ? 'Не' : 'Да' } });
+              const deactivate = o.isActive === 'Да';
+              if (deactivate) {
+                const yes = await confirmDialog({
+                  title: 'Деактивиране на оператор', text: `${o.name} ще загуби достъп веднага, включително в отворени сесии.`, confirmLabel: 'Деактивирайте', danger: true,
+                });
+                if (!yes) return;
+              }
+              await api(url, { method: 'PATCH', body: { isActive: deactivate ? 'Не' : 'Да' } });
+              toast(deactivate ? 'Операторът е деактивиран.' : 'Операторът е активиран.');
               await refresh();
+              renderTable();
             }))));
       })))));
   }
 
-  const submit = h('button', { class: 'btn', type: 'submit' }, 'Създайте покана');
+  const submit = h('button', { class: 'btn', type: 'submit' }, 'Изпратете покана');
   const form = h('form', { class: 'form', novalidate: true },
     h('div', { class: 'form__grid' },
       h('div', { class: 'field' }, h('label', { for: 'f-fullName' }, 'Име'), h('input', { id: 'f-fullName', name: 'fullName', type: 'text', maxlength: 160 })),
@@ -419,148 +719,44 @@ function viewOperators() {
       showFieldErrors(form, {});
       form.reset();
       await refresh();
+      renderTable();
       showDelivery(notice, result, `Покана за ${values.email}. С този линк операторът си задава парола.`);
     } catch (err) {
       showFieldErrors(form, err.fields);
-      showError(notice, err.message);
+      toast(err.message, 'error');
     }
     submit.disabled = false;
   });
 
-  page(tabs('operators'), notice, h('div', { class: 'stack' },
+  page(
+    pageHead('Оператори', 'Акаунтите се създават само с покана.'),
+    notice,
     tableBox,
-    h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Нов оператор'), form)));
+    h('div', { class: 'card' }, h('h2', { class: 'card__title' }, 'Нов оператор'), form),
+  );
   renderTable();
 }
 
-function clientCard(c) {
-  if (!c) return h('p', { class: 'muted' }, 'Няма данни за клиента.');
-  const isCompany = !!c.companyName;
-  return h('dl', { class: 'details' },
-    h('dt', {}, 'Вид'), h('dd', {}, c.personType),
-    h('dt', {}, isCompany ? 'Фирма' : 'Име'), h('dd', {}, h('a', { href: `#/c/${c.id}` }, isCompany ? c.companyName : [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' '))),
-    !isCompany && c.egnMasked && [h('dt', {}, 'ЕГН/ЛНЧ'), h('dd', {}, c.egnMasked)],
-    isCompany && c.representativeEgnMasked && [h('dt', {}, 'ЕГН/ЛНЧ на представляващия'), h('dd', {}, c.representativeEgnMasked)],
-    isCompany && [h('dt', {}, 'ЕИК'), h('dd', {}, c.eik)],
-    isCompany && c.vatNumber && [h('dt', {}, 'ДДС'), h('dd', {}, c.vatNumber)],
-    isCompany && [h('dt', {}, 'Представляващ'), h('dd', {}, c.representative)],
-    h('dt', {}, 'Телефон'), h('dd', {}, h('a', { href: `tel:${c.phone.replace(/[^+\d]/g, '')}` }, c.phone)),
-    h('dt', {}, 'Имейл'), h('dd', {}, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail)),
-    h('dt', {}, 'Адрес'), h('dd', {}, `${c.city}, ${c.address}`),
-    h('dt', {}, 'Вход чрез'), h('dd', {}, loginLabel(c)));
-}
-
-function eventLine(e) {
-  if (e.fromStatus || e.toStatus) return `${e.action}: ${[e.fromStatus, e.toStatus].filter(Boolean).join(' → ')}`;
-  return e.action;
-}
-
-async function viewRequest(id) {
-  page(h('div', { class: 'loading' }, 'Зареждане…'));
-  const url = `/admin/requests/${encodeURIComponent(id)}`;
-  const detail = await api(url);
-  const r = detail.request;
-
-  const updateAlert = h('div', { 'aria-live': 'polite' });
-  const save = async (patch) => {
-    updateAlert.replaceChildren();
-    try {
-      const { request } = await api(url, { method: 'PATCH', body: patch });
-      const row = data.requests.find((x) => x.id === id);
-      if (row) Object.assign(row, request);
-      await viewRequest(id);
-    } catch (err) {
-      showError(updateAlert, err.message);
-    }
-  };
-
-  const status = h('select', { id: 'f-status', onchange: () => save({ requestStatus: status.value }) },
-    meta.statuses.map((s) => h('option', { value: s, selected: s === r.requestStatus }, s)));
-  const assigned = h('select', { id: 'f-assigned', onchange: () => save({ assignedTo: assigned.value }) },
-    h('option', { value: '' }, 'Без отговорник'),
-    data.operators.map((o) => h('option', { value: o.email, selected: o.email === r.assignedTo }, o.name)));
-  const takeIt = !r.assignedTo && h('button', {
-    class: 'link-btn small', type: 'button', onclick: () => save({ assignedTo: me.operator.email }),
-  }, 'Поемам я');
-
-  const msgAlert = h('div', { 'aria-live': 'polite' });
-  const send = h('button', { class: 'btn', type: 'submit' }, 'Добавете бележката');
-  const form = h('form', { class: 'form', novalidate: true },
-    h('fieldset', { class: 'field' },
-      h('legend', {}, 'Вид'),
-      h('div', { class: 'kind' },
-        h('label', {}, h('input', {
-          type: 'radio', name: 'audience', value: 'internal', checked: true,
-          onchange: () => { send.textContent = 'Добавете бележката'; },
-        }), h('b', {}, 'Вътрешна бележка'), h('span', {}, 'Вижда се само от оператори')),
-        h('label', {}, h('input', {
-          type: 'radio', name: 'audience', value: 'client',
-          onchange: () => { send.textContent = 'Изпратете на клиента'; },
-        }), h('b', {}, 'Съобщение до клиента'), h('span', {}, 'Клиентът го вижда в портала')))),
-    h('div', { class: 'field' },
-      h('label', { for: 'f-message' }, 'Текст'),
-      h('textarea', { id: 'f-message', name: 'message', maxlength: 2000 })),
-    msgAlert,
-    h('div', {}, send));
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    send.disabled = true;
-    const { message, audience } = formValues(form);
-    try {
-      await api(`${url}/messages`, { method: 'POST', body: { message, internal: audience !== 'client' } });
-      await viewRequest(id);
-    } catch (err) {
-      showFieldErrors(form, err.fields);
-      showError(msgAlert, err.message);
-      send.disabled = false;
-    }
-  });
-
-  page(
-    h('a', { class: 'back', href: '#/' }, '← Всички заявки'),
-    h('div', { class: 'split' },
-      h('div', { class: 'stack' },
-        h('div', {},
-          h('div', { class: 'row' }, h('h1', {}, r.service), statusPill(r.requestStatus)),
-          h('p', { class: 'muted' }, `${r.serviceCategory} · № ${r.id} · подадена на ${formatTime(r.createdAt)}`)),
-        h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:8px' }, 'Описание от клиента'), h('p', { class: 'pre' }, r.details)),
-        h('h2', {}, 'История'),
-        h('ol', { class: 'timeline' }, detail.events.map((e) =>
-          h('li', { class: e.visibility === 'Вътрешно' ? 'is-internal' : e.actorType === 'Оператор' ? 'is-operator' : 'is-client' },
-            h('div', { class: 'timeline__head' },
-              h('span', {}, `${e.actorName} · ${eventLine(e)}`, e.visibility === 'Вътрешно' ? ' · само за оператори' : ''),
-              h('time', { datetime: e.occurredAt }, formatTime(e.occurredAt))),
-            e.message && h('p', { class: 'timeline__msg' }, e.message)))),
-        h('div', { class: 'card' }, form)),
-      h('aside', { class: 'stack' },
-        h('div', { class: 'card form' },
-          h('h2', {}, 'Обработка'),
-          h('div', { class: 'field' }, h('label', { for: 'f-status' }, 'Статус'), status),
-          h('div', { class: 'field' }, h('label', { for: 'f-assigned' }, 'Отговорен оператор'), assigned, takeIt),
-          updateAlert),
-        h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:12px' }, 'Клиент'), clientCard(detail.client)))),
-  );
-}
+// --- Маршрути ---
 
 async function route() {
   const hash = location.hash.replace(/^#/, '') || '/';
-  const m = hash.match(/^\/r\/([\w-]+)$/);
-  const clientMatch = hash.match(/^\/c\/([\w-]+)$/);
+  const [path, queryText] = hash.split('?');
+  const requestMatch = path.match(/^\/r\/([\w-]+)$/);
+  const clientMatch = path.match(/^\/c\/([\w-]+)$/);
+  window.scrollTo(0, 0);
   try {
-    if (m) {
-      await viewRequest(m[1]);
-    } else if (clientMatch) {
-      await viewClient(clientMatch[1]);
-    } else {
-      page(h('div', { class: 'loading' }, 'Зареждане…'));
-      data = await api('/admin/overview');
-      if (hash === '/clients') viewClients();
-      else if (hash === '/me') viewMe();
-      else if (hash === '/changes') viewChanges();
-      else if (hash === '/privacy' && data.privacy) viewPrivacyRequests();
-      else if (hash === '/operators' && data.team) viewOperators();
-      else viewRequests();
-    }
+    if (requestMatch) return await viewRequest(requestMatch[1]);
+    if (clientMatch) return await viewClient(clientMatch[1]);
+    loading();
+    await refresh();
+    if (path === '/requests') viewRequests(queryText !== undefined ? new URLSearchParams(queryText) : null);
+    else if (path === '/clients') viewClients();
+    else if (path === '/changes') viewChanges();
+    else if (path === '/privacy' && data.privacy) viewPrivacyRequests();
+    else if (path === '/operators' && data.team) viewOperators();
+    else if (path === '/me') viewMe();
+    else viewDashboard();
   } catch (err) {
     if (err.status === 401) return location.replace('/operator.html');
     fatal(main, err);
@@ -579,8 +775,29 @@ async function init() {
     return;
   }
   [meta, data] = await Promise.all([api('/meta'), api('/admin/overview')]);
-  main = mount({ tag: 'Оператори', user: me.operator.name || me.operator.email });
+  shell = mountShell({
+    tag: 'Оператори',
+    user: me.operator.name || me.operator.email,
+    detail: me.operator.role,
+    nav: () => [
+      { key: 'home', href: '#/', label: 'Табло', icon: 'home', match: /^\/$/ },
+      { key: 'requests', href: '#/requests?all=1', label: 'Заявки', icon: 'inbox', match: /^\/(requests|r\/.*)$/ },
+      { key: 'clients', href: '#/clients', label: 'Клиенти', icon: 'users', match: /^\/(clients|c\/.*)$/ },
+      { key: 'changes', href: '#/changes', label: 'Промени', icon: 'check', match: /^\/changes$/ },
+      ...(isAdmin() ? [
+        { key: 'privacy', href: '#/privacy', label: 'Лични данни', icon: 'shield', match: /^\/privacy$/ },
+        { key: 'operators', href: '#/operators', label: 'Оператори', icon: 'team', match: /^\/operators$/ },
+      ] : []),
+      { key: 'me', href: '#/me', label: 'Моят акаунт', icon: 'user', match: /^\/me$/ },
+    ],
+  });
+  main = shell.main;
+  syncBadges();
   window.addEventListener('hashchange', route);
+  // Данните се опресняват, когато операторът се върне в раздела.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refresh().catch(() => {});
+  });
   await route();
 }
 
