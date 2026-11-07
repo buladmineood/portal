@@ -1,9 +1,10 @@
-import { api, contactFields, fatal, formValues, h, identityFields, mount, showError, showFieldErrors } from './core.js';
+import { api, contactFields, fatal, formValues, h, icon, identityFields, mount, showError, showFieldErrors } from './core.js';
 
 async function init() {
   const me = await api('/me');
   if (!me.authenticated) return location.replace('/');
   if (me.operator) return location.replace('/admin.html');
+  if (me.needsEmailVerification) return verifyScreen(me);
   if (me.client) return location.replace('/account.html');
 
   const main = mount({ user: me.identity.email || me.identity.name });
@@ -70,6 +71,45 @@ async function init() {
     h('p', { class: 'muted' }, 'Влязохте успешно. Попълнете данните си веднъж и няма да ги въвеждате при всяка заявка.'),
     h('div', { class: 'card' }, form)));
   applyKind();
+}
+
+// Регистрацията с имейл и парола продължава едва след потвърждение на адреса.
+function verifyScreen(me) {
+  const main = mount({ user: me.identity.email });
+  const result = h('div', { 'aria-live': 'polite' });
+  const resend = h('button', {
+    class: 'btn btn--ghost', type: 'button',
+    onclick: async () => {
+      resend.disabled = true;
+      try {
+        await api('/auth/resend-verification', { method: 'POST' });
+        result.replaceChildren(h('div', { class: 'alert alert--ok', role: 'status' }, 'Изпратихме нов линк. Проверете и папката за нежелана поща.'));
+      } catch (err) {
+        showError(result, err.message);
+      }
+      resend.disabled = false;
+    },
+  }, 'Изпратете линка отново');
+  main.append(h('div', { class: 'wrap wrap--narrow section' },
+    h('section', { class: 'card login__card verify-card' },
+      h('span', { class: 'empty__icon' }, icon('mail', 26)),
+      h('h1', {}, 'Потвърдете имейла си'),
+      h('p', {}, 'Изпратихме линк до ', h('strong', {}, me.identity.email), '. Отворете го, за да продължите с регистрацията.'),
+      h('ol', { class: 'steps steps--light' },
+        h('li', {}, h('b', {}, '1'), h('span', {}, 'Отворете пощата си и намерете писмото от БУЛАДМИН.')),
+        h('li', {}, h('b', {}, '2'), h('span', {}, 'Натиснете „Потвърдете имейла“ в писмото.')),
+        h('li', {}, h('b', {}, '3'), h('span', {}, 'Върнете се тук и попълнете данните си.'))),
+      result,
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', type: 'button', onclick: () => location.reload() }, 'Вече потвърдих'),
+        resend),
+      h('p', { class: 'small muted' }, 'Не намирате писмото? Проверете папката за нежелана поща. Линкът важи 7 дни.'))));
+  // Ако потвърждението стане в друг раздел, тази страница продължава сама.
+  document.addEventListener('visibilitychange', async () => {
+    if (document.hidden) return;
+    const fresh = await api('/me').catch(() => null);
+    if (fresh && !fresh.needsEmailVerification) location.reload();
+  });
 }
 
 init().catch((err) => fatal(mount({}), err));

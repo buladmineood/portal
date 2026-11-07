@@ -808,7 +808,9 @@ test('потвърждение на имейл: изисква се за зая�
   assert.equal(mail.from, 'accounts@portal.test');
   assert.equal(mail.to, 'a@example.com');
   assert.equal((await call(app, 'GET', '/api/me', { cookie })).data.needsEmailVerification, true);
-  await call(app, 'POST', '/api/register', { cookie, body: individual });
+  // Без потвърден имейл регистрацията не може да се завърши.
+  assert.equal((await call(app, 'POST', '/api/register', { cookie, body: individual })).status, 403);
+  assert.equal(store.tables.clients.length, 0);
   assert.equal((await call(app, 'POST', '/api/requests', { cookie, body: newRequest })).status, 403);
   assert.equal((await call(app, 'POST', '/api/auth/resend-verification', { cookie })).status, 429);
 
@@ -818,6 +820,7 @@ test('потвърждение на имейл: изисква се за зая�
   assert.equal((await call(app, 'POST', '/api/auth/verify-email', { body: { token } })).status, 200);
   assert.equal((await call(app, 'POST', '/api/auth/verify-email', { body: { token } })).status, 400);
   assert.equal((await call(app, 'GET', '/api/me', { cookie })).data.needsEmailVerification, false);
+  assert.equal((await call(app, 'POST', '/api/register', { cookie, body: individual })).status, 201);
   assert.equal((await call(app, 'POST', '/api/requests', { cookie, body: newRequest })).status, 201);
   const confirm = store.sentMail.at(-1);
   assert.equal(confirm.from, 'no-reply@portal.test');
@@ -888,6 +891,162 @@ test('имейли: искане за лични данни известява D
   assert.equal(store.sentMail.at(-1).to, 'alice@example.com');
   assert.ok(store.sentMail.at(-1).subject.includes('одобрена'));
   assert.ok(!store.sentMail.at(-1).text.includes('0888000111'));
+});
+
+test('имейли: HTML с визия, статус и екранирани стойности', async () => {
+  const { app, store } = mailSetup();
+  // Името не минава проверката при регистрация, но оператор или стари данни може да го съдържат.
+  assert.equal((await call(app, 'POST', '/api/register', { as: 'alice', body: { ...individual, firstName: 'Ал<script>' } })).status, 422);
+  await call(app, 'POST', '/api/register', { as: 'alice', body: individual });
+  store.sentMail.length = 0;
+  store.tables.clients[0].firstName = '<img src=x onerror=alert(1)>';
+  const { request } = (await call(app, 'POST', '/api/requests', { as: 'alice', body: newRequest })).data;
+  const [mail] = store.sentMail;
+  assert.ok(mail.html.startsWith('<!doctype html>'));
+  assert.ok(mail.html.includes('БУЛ<span'));
+  assert.ok(mail.html.includes(request.id));
+  assert.ok(mail.html.includes('Проследете заявката'));
+  assert.ok(!mail.html.includes('<img src=x'), 'стойностите трябва да са екранирани');
+  assert.ok(mail.html.includes('&lt;img src=x'));
+  assert.ok(mail.text.includes('Статус: Нова (етап 1 от 6)'));
+  await call(app, 'PATCH', `/api/admin/requests/${request.id}`, { as: 'op', body: { requestStatus: 'Подадена' } });
+  const status = store.sentMail.at(-1);
+  assert.ok(status.text.includes('етап 4 от 6'));
+  assert.ok(status.html.includes('&#10003;')); // завършените етапи са отметнати
+});
+
+// --- Код по имейл за операторите ---
+
+async function mfaSetup() {
+  const { app, store } = mailSetup();
+  await call(app, 'POST', '/api/admin/operators', { as: 'op', body: { email: 'nov@bulmail.eu', fullName: 'Нов' } });
+  const token = linkIn(store.sentMail.at(-1)).split('#t=')[1];
+  await call(app, 'POST', '/api/auth/set-password', { body: { token, password: GOOD_PASSWORD } });
+  store.sentMail.length = 0;
+  return { app, store };
+}
+const mfaCookieOf = (res) => res.headers.getSetCookie().find((c) => c.startsWith('__Host-ba_mfa=')).split(';')[0];
+const codeIn = (mail) => mail.text.match(/Код: (\d{6})/)[1];
+
+test('2FA: паролата не стига, кодът по имейл дава вход', async () => {
+  const { app, store } = await mfaSetup();
+  const login = await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'nov@bulmail.eu', password: GOOD_PASSWORD } });
+  assert.equal(login.data.mfaRequired, true);
+  assert.ok(!login.res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`)));
+  const mfa = mfaCookieOf(login.res);
+  const [mail] = store.sentMail;
+  assert.equal(mail.from, 'accounts@portal.test');
+  assert.equal(mail.to, 'nov@bulmail.eu');
+  const code = codeIn(mail);
+  assert.ok(!store.tables.operators.find((o) => o.id === 'nov@bulmail.eu').mfaCodeHash.includes(code));
+  // Без бисквитката от входа кодът не върши работа.
+  assert.equal((await call(app, 'POST', '/api/auth/operator-mfa', { body: { code } })).status, 401);
+  assert.equal((await call(app, 'POST', '/api/auth/operator-mfa', { cookie: mfa, body: { code: '000000' === code ? '111111' : '000000' } })).status, 422);
+  const ok = await call(app, 'POST', '/api/auth/operator-mfa', { cookie: mfa, body: { code } });
+  assert.equal(ok.status, 200);
+  const session = cookieOf(ok.res);
+  assert.equal((await call(app, 'GET', '/api/admin/overview', { cookie: session })).status, 200);
+  // Кодът е еднократен.
+  assert.equal((await call(app, 'POST', '/api/auth/operator-mfa', { cookie: mfa, body: { code } })).status, 400);
+});
+
+test('2FA: 5 грешни кода обезсилват кода', async () => {
+  const { app, store } = await mfaSetup();
+  const login = await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'nov@bulmail.eu', password: GOOD_PASSWORD } });
+  const mfa = mfaCookieOf(login.res);
+  const code = codeIn(store.sentMail[0]);
+  const wrong = code === '123456' ? '654321' : '123456';
+  for (let i = 0; i < 5; i++) await call(app, 'POST', '/api/auth/operator-mfa', { cookie: mfa, body: { code: wrong } });
+  const after = await call(app, 'POST', '/api/auth/operator-mfa', { cookie: mfa, body: { code } });
+  assert.notEqual(after.status, 200);
+});
+
+test('2FA: нов код не по-често от минута; изключва се само от друг администратор', async () => {
+  const { app, store } = await mfaSetup();
+  const login = await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'nov@bulmail.eu', password: GOOD_PASSWORD } });
+  const mfa = mfaCookieOf(login.res);
+  assert.equal((await call(app, 'POST', '/api/auth/operator-mfa/resend', { cookie: mfa })).status, 429);
+  assert.equal((await call(app, 'PATCH', '/api/admin/operators/op%40bulmail.eu', { as: 'op', body: { mfaEnabled: 'Не' } })).status, 422);
+  assert.equal((await call(app, 'PATCH', '/api/admin/operators/nov%40bulmail.eu', { as: 'op', body: { mfaEnabled: 'Не' } })).status, 200);
+  const direct = await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'nov@bulmail.eu', password: GOOD_PASSWORD } });
+  assert.equal(direct.data.ok, true);
+  void store;
+});
+
+test('2FA: важи и при вход със свързан Microsoft акаунт', async () => {
+  const { store } = mailSetup();
+  store.tables.operators[0].microsoftId = `microsoft:${TENANT}:m1`;
+  let nonce;
+  const mailEnv = { ...env, MAIL_ENABLED: 'true', MAIL_ACCOUNTS: 'accounts@portal.test', MAIL_NOREPLY: 'no-reply@portal.test' };
+  const app = createApp({ env: mailEnv, store, fetchImpl: async () => new Response(JSON.stringify({ id_token: jwt(msClaims(nonce)) })) });
+  const flow = await startFlow(app, 'microsoft');
+  nonce = flow.nonce;
+  const res = await app(new Request(`${ORIGIN}/api/auth/microsoft/callback?code=c&state=${flow.state}`, { headers: { cookie: flow.cookie } }));
+  assert.equal(res.headers.get('location'), '/operator.html#mfa');
+  assert.ok(!res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`)));
+  assert.ok(res.headers.getSetCookie().some((c) => c.startsWith('__Host-ba_mfa=')));
+  assert.equal(store.sentMail.length, 1);
+});
+
+// --- Отдели ---
+
+test('отдели: създава само администратор, новите заявки се насочват по категория', async () => {
+  const { app, store } = setup();
+  assert.equal((await call(app, 'POST', '/api/admin/departments', { as: 'plain', body: { name: 'Имоти' } })).status, 403);
+  const created = await call(app, 'POST', '/api/admin/departments', { as: 'op', body: { name: 'Имоти и наследства', categories: ['Имоти', 'Наследства', 'Измислена'] } });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.data.department.categories, ['Имоти', 'Наследства']);
+  assert.equal((await call(app, 'POST', '/api/admin/departments', { as: 'op', body: { name: 'имоти и наследства' } })).status, 409);
+  const { id } = created.data.department;
+
+  await registered(app);
+  const { request } = (await call(app, 'POST', '/api/requests', { as: 'alice', body: newRequest })).data;
+  assert.equal(store.tables.requests[0].department, id);
+  assert.equal(request.department, id);
+  const other = await call(app, 'POST', '/api/requests', { as: 'alice', body: freeRequest });
+  assert.equal(store.tables.requests.find((r) => r.id === other.data.request.id).department, '');
+
+  // Оператор: отдел и длъжност; невалиден отдел се отказва.
+  assert.equal((await call(app, 'PATCH', '/api/admin/operators/plain%40bulmail.eu', { as: 'op', body: { department: 'D-няма' } })).status, 422);
+  const op = await call(app, 'PATCH', '/api/admin/operators/plain%40bulmail.eu', { as: 'op', body: { department: id, jobTitle: 'Експерт' } });
+  assert.equal(op.data.operator.department, id);
+  assert.equal(op.data.operator.jobTitle, 'Експерт');
+  // Своя отдел и длъжност администраторът може да сменя.
+  assert.equal((await call(app, 'PATCH', '/api/admin/operators/op%40bulmail.eu', { as: 'op', body: { department: id } })).status, 200);
+
+  // Прехвърляне на заявка и деактивиран отдел.
+  const move = await call(app, 'PATCH', `/api/admin/requests/${other.data.request.id}`, { as: 'plain', body: { department: id } });
+  assert.equal(move.data.request.department, id);
+  assert.ok(store.tables.events.some((e) => e.action.includes('Имоти и наследства') && e.visibility === 'Вътрешно'));
+  await call(app, 'PATCH', `/api/admin/departments/${id}`, { as: 'op', body: { isActive: 'Не' } });
+  await call(app, 'POST', '/api/requests', { as: 'alice', body: newRequest });
+  assert.equal(store.tables.requests.at(-1).department, '');
+  const overview = await call(app, 'GET', '/api/admin/overview', { as: 'plain' });
+  assert.equal(overview.data.departments[0].isActive, 'Не');
+});
+
+// --- Ограничение на опитите ---
+
+test('ограничение на опитите: отказ при изчерпан лимит, по вид и IP', async () => {
+  const keys = [];
+  const store = new MemoryStore();
+  const limiter = { limit: async ({ key }) => { keys.push(key); return { success: keys.length <= 2 }; } };
+  const app = createApp({ env: { ...env, LOGIN_LIMITER: limiter }, store });
+  const login = (ip) => app(new Request(`${ORIGIN}/api/auth/login`, {
+    method: 'POST',
+    headers: { origin: ORIGIN, 'content-type': 'application/json', 'cf-connecting-ip': ip },
+    body: JSON.stringify({ email: 'a@example.com', password: 'грешна-парола' }),
+  }));
+  assert.equal((await login('1.2.3.4')).status, 401);
+  assert.equal((await login('1.2.3.4')).status, 401);
+  assert.equal((await login('1.2.3.4')).status, 429);
+  assert.deepEqual([...new Set(keys)], ['login:1.2.3.4']);
+});
+
+test('API отговорите не се индексират', async () => {
+  const { app } = setup();
+  const res = await call(app, 'GET', '/api/meta');
+  assert.equal(res.res.headers.get('x-robots-tag'), 'noindex, nofollow');
 });
 
 test('имейлите са изключени: няма изпращане и няма изискване за потвърждение', async () => {

@@ -429,7 +429,7 @@ async function init() {
   const me = await api('/me');
   if (!me.authenticated) return location.replace('/');
   if (me.operator && !me.client) return location.replace('/admin.html');
-  if (!me.client) return location.replace('/register.html');
+  if (me.needsEmailVerification || !me.client) return location.replace('/register.html');
   const meta = await api('/meta');
   state = { me, meta, client: me.client };
   const shell = mountShell({

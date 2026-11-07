@@ -1,7 +1,8 @@
 import { CATALOG, CONSENT_VERSION, PRIVACY_RIGHTS, PRIVACY_STATUSES, STATUSES } from './catalog.js';
 import {
-  b64url, hashPassword, randomCode, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
+  b64url, hashPassword, randomCode, randomDigits, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
 } from './crypto.js';
+import { renderEmail } from './email.js';
 import { beginLogin, completeLogin, isProvider } from './oauth.js';
 import schema from './schema.json' with { type: 'json' };
 import {
@@ -45,6 +46,7 @@ const json = (data, status = 200, headers = {}) =>
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
+      'x-robots-tag': 'noindex, nofollow',
       ...headers,
     },
   });
@@ -82,6 +84,9 @@ const addMonths = (date, months) => {
   return next.toISOString().replace(/\.\d+Z$/, 'Z');
 };
 
+const DAY_FORMAT = new Intl.DateTimeFormat('bg-BG', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Sofia' });
+const formatDay = (iso) => DAY_FORMAT.format(new Date(iso));
+
 const shownValue = (key, value) => (SENSITIVE_FIELDS.includes(key) ? maskEgn(value) : value ?? '');
 function publicRequest(r) {
   const { assignedTo, ...rest } = r;
@@ -100,11 +105,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   const mailEnabled = env.MAIL_ENABLED === 'true';
 
   // Неуспешен имейл не трябва да проваля действието на потребителя.
-  async function sendMail(from, to, subject, lines) {
+  async function sendMail(from, to, subject, message) {
     if (!mailEnabled || !to) return false;
     try {
-      const text = [...lines, '', 'БУЛАДМИН', env.PORTAL_ORIGIN, '', 'Това съобщение е автоматично. Моля, не отговаряйте на него.'].join('\n');
-      await store.sendMail(from, to, subject, text);
+      await store.sendMail(from, to, subject, renderEmail({ origin: env.PORTAL_ORIGIN, preheader: subject, ...message }));
       return true;
     } catch (err) {
       console.error('mail failed', err.message);
@@ -112,10 +116,19 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     }
   }
 
-  const notifyClient = async (clientId, subject, lines) => {
+  const notifyClient = async (clientId, subject, message) => {
     const [client] = await store.find('clients', 'id', clientId);
-    return sendMail(env.MAIL_NOREPLY, client?.contactEmail, subject, lines);
+    return sendMail(env.MAIL_NOREPLY, client?.contactEmail, subject, message);
   };
+  const requestDetails = (record) => [['Номер', record.id], ['Услуга', record.service], ['Категория', record.serviceCategory]];
+
+  // Ограничение на опитите по IP чрез Cloudflare Rate Limiting. Без връзката (тестове, локално) не ограничава.
+  async function rateLimit(request, bucket) {
+    if (!env.LOGIN_LIMITER) return;
+    const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+    const { success } = await env.LOGIN_LIMITER.limit({ key: `${bucket}:${ip}` });
+    if (!success) throw new HttpError(429, 'Твърде много опити. Изчакайте минута и опитайте отново.');
+  }
   const requestUrl = (id) => `${env.PORTAL_ORIGIN}/account.html#/r/${id}`;
 
   // Локалните сесии се сверяват с таблицата при всяка заявка, така че смяна на парола
@@ -158,7 +171,16 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     return client || null;
   }
 
+  // Регистрация с имейл и парола е завършена едва след потвърждение на адреса.
+  const needsVerification = (session) => mailEnabled && session.provider === 'local' && !session.principal?.emailVerifiedAt;
+  function requireVerified(session) {
+    if (needsVerification(session)) {
+      throw new HttpError(403, 'Първо потвърдете имейла си с линка, който Ви изпратихме.');
+    }
+  }
+
   async function requireClient(session) {
+    requireVerified(session);
     const client = await findClient(session);
     if (!client) throw new HttpError(403, 'Първо завършете регистрацията.');
     return client;
@@ -269,6 +291,14 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const [operator] = await store.find('operators', column, identity.sub);
     if (operator) {
       if (operator.isActive !== 'Да') return failed();
+      // Кодът по имейл важи и при вход с Google или Microsoft.
+      if (mfaRequired(operator)) {
+        try {
+          return redirect('/operator.html#mfa', [clearFlow, await startMfa(operator)]);
+        } catch {
+          return redirect('/operator.html?error=mfa', [clearFlow]);
+        }
+      }
       return redirect('/admin.html', [clearFlow, await sessionCookie(principalSession('operators', operator))]);
     }
     const [account] = await store.find('accounts', column, identity.sub);
@@ -327,6 +357,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (Number(row.failedLogins || 0) > 0 || row.lockedUntil) {
       await store.update(table, row.id, { failedLogins: '0', lockedUntil: '' });
     }
+    // Паролата е вярна, но операторът влиза едва след кода от имейла.
+    if (table === 'operators' && mfaRequired(row)) {
+      return json({ mfaRequired: true }, 200, { 'set-cookie': await startMfa(row) });
+    }
     return json({ ok: true }, 200, { 'set-cookie': await sessionCookie(principalSession(table, row)) });
   }
 
@@ -353,14 +387,15 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       verifyTokenHash: await hashToken(token),
       verifyExpires: new Date(now().getTime() + VERIFY_TTL_MS).toISOString(),
     });
-    return sendMail(env.MAIL_ACCOUNTS, account.email, 'Потвърдете имейла си за портала на БУЛАДМИН', [
-      'Здравейте,',
-      '',
-      'Потвърдете имейла си с този линк, за да можете да подавате заявки:',
-      `${env.PORTAL_ORIGIN}/verify-email.html#t=${token}`,
-      '',
-      'Линкът важи 7 дни. Ако не сте се регистрирали Вие, не правете нищо.',
-    ]);
+    return sendMail(env.MAIL_ACCOUNTS, account.email, 'Потвърдете имейла си за портала на БУЛАДМИН', {
+      title: 'Потвърдете имейла си',
+      paragraphs: [
+        'Благодарим Ви, че се регистрирахте в портала на БУЛАДМИН.',
+        'Потвърдете, че този адрес е Ваш, за да завършите регистрацията и да подавате заявки.',
+      ],
+      action: { label: 'Потвърдете имейла', url: `${env.PORTAL_ORIGIN}/verify-email.html#t=${token}` },
+      note: 'Линкът важи 7 дни. Ако не сте се регистрирали Вие, не правете нищо и профилът няма да бъде активиран.',
+    });
   }
 
   async function resendVerification(request) {
@@ -397,14 +432,12 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       if (!row || (table === 'operators' && row.isActive !== 'Да')) return;
       if (Date.parse(row.resetSentAt) > now().getTime() - MAIL_THROTTLE_MS) return;
       const link = await issueSetupLink(table, row.id, RESET_TTL_MS);
-      await sendMail(env.MAIL_ACCOUNTS, email, 'Нова парола за портала на БУЛАДМИН', [
-        'Здравейте,',
-        '',
-        'Получихме заявка за нова парола. Задайте я с този линк:',
-        link,
-        '',
-        'Линкът важи 1 час и може да се използва веднъж. Ако не сте я поискали Вие, не правете нищо. Паролата Ви остава същата.',
-      ]);
+      await sendMail(env.MAIL_ACCOUNTS, email, 'Нова парола за портала на БУЛАДМИН', {
+        title: 'Нова парола',
+        paragraphs: ['Получихме заявка за нова парола за Вашия профил в портала на БУЛАДМИН.'],
+        action: { label: 'Задайте нова парола', url: link },
+        note: 'Линкът важи 1 час и може да се използва веднъж. Ако не сте поискали нова парола, не правете нищо: паролата Ви остава същата.',
+      });
     })().catch((err) => console.error('forgot failed', err.message));
     if (ctx?.waitUntil) ctx.waitUntil(work);
     else await work;
@@ -412,8 +445,12 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   }
 
   // Изпраща линка по имейл; ако това не успее, го връща, за да го предаде операторът сам.
-  async function deliverLink(to, subject, lines, link) {
-    const emailed = await sendMail(env.MAIL_ACCOUNTS, to, subject, [...lines, link, '', 'Линкът може да се използва веднъж и важи 72 часа.']);
+  async function deliverLink(to, subject, message, link) {
+    const emailed = await sendMail(env.MAIL_ACCOUNTS, to, subject, {
+      ...message,
+      action: { label: message.actionLabel, url: link },
+      note: 'Линкът може да се използва веднъж и важи 72 часа. Ако не очаквате този имейл, не правете нищо.',
+    });
     return emailed ? { emailed: true, to } : { emailed: false, link };
   }
 
@@ -473,6 +510,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     name: o.fullName,
     role: o.role,
     isActive: o.isActive,
+    department: o.department || '',
+    jobTitle: o.jobTitle || '',
+    mfa: o.mfaEnabled !== 'Не',
     pendingSetup: !o.passwordHash,
     google: !!o.googleId,
     microsoft: !!o.microsoftId,
@@ -484,20 +524,34 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const email = clean(body.email, 200).toLowerCase();
     const fullName = clean(body.fullName, 160);
     const role = body.role === ADMIN_ROLE ? ADMIN_ROLE : 'Оператор';
+    const jobTitle = clean(body.jobTitle, 100);
     const errors = {};
     if (!isValidEmail(email)) errors.email = 'Въведете валиден имейл.';
     if (!fullName) errors.fullName = 'Въведете име.';
+    const department = await validDepartment(body.department);
+    if (department === null) errors.department = 'Изберете съществуващ отдел.';
     failIfErrors(errors);
     if ((await store.find('operators', 'id', email)).length) {
       throw new HttpError(409, 'Вече има оператор с този имейл.', { email: 'Вече има оператор с този имейл.' });
     }
-    await store.create('operators', { id: email, fullName, role, isActive: 'Да', sessionVersion: '0', failedLogins: '0' });
+    await store.create('operators', {
+      id: email, fullName, role, department, jobTitle, isActive: 'Да', mfaEnabled: 'Да', sessionVersion: '0', failedLogins: '0',
+    });
     const link = await issueSetupLink('operators', email);
-    return json(await deliverLink(email, 'Покана за портала на БУЛАДМИН', [
-      `Здравейте, ${fullName},`,
-      '',
-      'Поканени сте като оператор в портала на БУЛАДМИН. Задайте парола с този линк:',
-    ], link), 201);
+    return json(await deliverLink(email, 'Покана за портала на БУЛАДМИН', {
+      title: 'Покана за портала',
+      paragraphs: [`Здравейте, ${fullName},`, 'Поканени сте като оператор в портала на БУЛАДМИН. Задайте парола, за да влезете за първи път.'],
+      details: [['Имейл за вход', email], ['Роля', role]],
+      actionLabel: 'Задайте парола',
+    }, link), 201);
+  }
+
+  // Празно = без отдел; null = несъществуващ или неактивен отдел.
+  async function validDepartment(value) {
+    if (value === undefined || value === '') return '';
+    if (typeof value !== 'string') return null;
+    const [row] = await store.find('departments', 'id', value);
+    return row && row.isActive === 'Да' ? row.id : null;
   }
 
   async function updateOperator(request, id) {
@@ -505,20 +559,156 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const body = await readBody(request);
     const [row] = await store.find('operators', 'id', id);
     if (!row) throw new HttpError(404, 'Операторът не е намерен.');
-    // Така винаги остава поне един активен администратор, който може да управлява останалите.
-    if (row.id === admin.id) throw new HttpError(422, 'Не можете да променяте собствения си достъп.');
     const patch = {};
+    if (body.department !== undefined) {
+      const department = await validDepartment(body.department);
+      if (department === null) throw new HttpError(422, 'Изберете съществуващ отдел.');
+      patch.department = department;
+    }
+    if (body.jobTitle !== undefined) patch.jobTitle = clean(body.jobTitle, 100);
+    const accessChange = ['isActive', 'role', 'mfaEnabled'].some((key) => body[key] !== undefined);
+    // Своя достъп администраторът не може да намали: винаги остава поне един, който управлява останалите.
+    if (accessChange && row.id === admin.id) throw new HttpError(422, 'Не можете да променяте собствения си достъп.');
     if (body.isActive === 'Да' || body.isActive === 'Не') patch.isActive = body.isActive;
     if (body.role === ADMIN_ROLE || body.role === 'Оператор') patch.role = body.role;
+    if (body.mfaEnabled === 'Да' || body.mfaEnabled === 'Не') patch.mfaEnabled = body.mfaEnabled;
     if (Object.keys(patch).length) await store.update('operators', id, patch);
-    return json({ ok: true });
+    return json({ operator: publicOperator({ ...row, ...patch }) });
   }
 
   async function operatorResetLink(request, id) {
     requireAdmin(await requireSession(request));
     if (!(await store.find('operators', 'id', id)).length) throw new HttpError(404, 'Операторът не е намерен.');
     const link = await issueSetupLink('operators', id);
-    return json(await deliverLink(id, 'Нова парола за портала на БУЛАДМИН', ['Здравейте,', '', 'Задайте нова парола с този линк:'], link));
+    return json(await deliverLink(id, 'Нова парола за портала на БУЛАДМИН', {
+      title: 'Нова парола',
+      paragraphs: ['Администраторът на портала Ви изпрати линк за нова парола.'],
+      actionLabel: 'Задайте нова парола',
+    }, link));
+  }
+
+  // --- Отдели (само администратор) ---
+
+  const publicDepartment = (d) => {
+    let categories = [];
+    try { categories = JSON.parse(d.categories || '[]'); } catch { /* празен списък */ }
+    return { id: d.id, name: d.name, categories, isActive: d.isActive };
+  };
+
+  function validateDepartment(body) {
+    const name = clean(body.name, 100);
+    const categories = Array.isArray(body.categories)
+      ? [...new Set(body.categories.filter((c) => CATALOG.some((x) => x.name === c)))]
+      : [];
+    if (name.length < 2) throw new HttpError(422, 'Въведете име на отдела.', { name: 'Въведете име на отдела.' });
+    return { name, categories };
+  }
+
+  async function createDepartment(request) {
+    requireAdmin(await requireSession(request));
+    const { name, categories } = validateDepartment(await readBody(request));
+    const all = await store.list('departments');
+    if (all.some((d) => d.name.toLocaleLowerCase('bg') === name.toLocaleLowerCase('bg'))) {
+      throw new HttpError(409, 'Вече има отдел с това име.', { name: 'Вече има отдел с това име.' });
+    }
+    const record = { id: `D-${randomCode(6)}`, createdAt: nowIso(), name, categories: JSON.stringify(categories), isActive: 'Да' };
+    await store.create('departments', record);
+    return json({ department: publicDepartment(record) }, 201);
+  }
+
+  async function updateDepartment(request, id) {
+    requireAdmin(await requireSession(request));
+    const body = await readBody(request);
+    const [row] = await store.find('departments', 'id', id);
+    if (!row) throw new HttpError(404, 'Отделът не е намерен.');
+    const patch = {};
+    if (body.name !== undefined || body.categories !== undefined) {
+      const { name, categories } = validateDepartment({ name: body.name ?? row.name, categories: body.categories ?? publicDepartment(row).categories });
+      patch.name = name;
+      patch.categories = JSON.stringify(categories);
+    }
+    if (body.isActive === 'Да' || body.isActive === 'Не') patch.isActive = body.isActive;
+    await store.update('departments', id, patch);
+    return json({ department: publicDepartment({ ...row, ...patch }) });
+  }
+
+  // Първият активен отдел, който обработва категорията.
+  async function departmentForCategory(category) {
+    const departments = await store.list('departments');
+    return departments.find((d) => d.isActive === 'Да' && publicDepartment(d).categories.includes(category))?.id || '';
+  }
+
+  // --- Код по имейл при вход на оператор ---
+
+  const MFA_COOKIE = '__Host-ba_mfa';
+  const MFA_TTL_MS = 10 * 60 * 1000;
+  const MFA_MAX_ATTEMPTS = 5;
+  const MFA_RESEND_MS = 60 * 1000;
+  const mfaRequired = (operator) => mailEnabled && operator.mfaEnabled !== 'Не';
+
+  // Изпраща нов код и връща бисквитка, която свързва браузъра с този опит за вход.
+  async function startMfa(operator) {
+    const code = randomDigits();
+    const nonce = randomToken(16);
+    await store.update('operators', operator.id, {
+      mfaCodeHash: await hashToken(`${nonce}:${code}`),
+      mfaExpires: new Date(now().getTime() + MFA_TTL_MS).toISOString(),
+      mfaAttempts: '0',
+      mfaSentAt: now().toISOString(),
+    });
+    const sent = await sendMail(env.MAIL_ACCOUNTS, operator.id, `Код за вход: ${code}`, {
+      title: 'Код за вход в портала',
+      paragraphs: [`Здравейте, ${operator.fullName || operator.id},`, 'Въведете този код, за да завършите входа в операторската част на портала.'],
+      code,
+      note: 'Кодът важи 10 минути. Ако не сте се опитвали да влезете, някой знае паролата Ви: сменете я веднага и уведомете администратора.',
+    });
+    if (!sent) throw new HttpError(503, 'Не успяхме да изпратим кода за вход. Опитайте отново след малко.');
+    const ticket = await signToken(
+      { op: operator.id, nonce, ver: String(operator.sessionVersion || '0') },
+      env.SESSION_SECRET,
+      MFA_TTL_MS / 1000,
+      now().getTime(),
+    );
+    return cookieHeader(MFA_COOKIE, ticket, MFA_TTL_MS / 1000);
+  }
+
+  async function mfaTicket(request) {
+    const ticket = await verifyToken(readCookie(request, MFA_COOKIE), env.SESSION_SECRET, now().getTime());
+    const expired = new HttpError(401, 'Сесията за вход изтече. Влезте отново.');
+    if (!ticket) throw expired;
+    const [operator] = await store.find('operators', 'id', ticket.op);
+    if (!operator || operator.isActive !== 'Да' || String(operator.sessionVersion || '0') !== ticket.ver) throw expired;
+    return { ticket, operator };
+  }
+
+  async function verifyMfa(request) {
+    await rateLimit(request, 'mfa');
+    const { ticket, operator } = await mfaTicket(request);
+    const code = clean((await readBody(request)).code, 6);
+    const attempts = Number(operator.mfaAttempts || 0);
+    if (!operator.mfaCodeHash || !(Date.parse(operator.mfaExpires) > now().getTime())) {
+      throw new HttpError(400, 'Кодът изтече. Поискайте нов.');
+    }
+    if (attempts >= MFA_MAX_ATTEMPTS) throw new HttpError(429, 'Твърде много грешни опити. Поискайте нов код.');
+    if (!safeEqual(await hashToken(`${ticket.nonce}:${code}`), operator.mfaCodeHash)) {
+      const next = attempts + 1;
+      await store.update('operators', operator.id, next >= MFA_MAX_ATTEMPTS ? { mfaAttempts: String(next), mfaCodeHash: '' } : { mfaAttempts: String(next) });
+      throw new HttpError(422, 'Грешен код.', { code: 'Грешен код.' });
+    }
+    await store.update('operators', operator.id, { mfaCodeHash: '', mfaExpires: '', mfaAttempts: '0' });
+    const headers = new Headers({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    headers.append('set-cookie', cookieHeader(MFA_COOKIE, '', 0));
+    headers.append('set-cookie', await sessionCookie(principalSession('operators', operator)));
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
+  }
+
+  async function resendMfa(request) {
+    await rateLimit(request, 'mfa');
+    const { operator } = await mfaTicket(request);
+    if (Date.parse(operator.mfaSentAt) > now().getTime() - MFA_RESEND_MS) {
+      throw new HttpError(429, 'Изчакайте минута, преди да поискате нов код.');
+    }
+    return json({ ok: true }, 200, { 'set-cookie': await startMfa(operator) });
   }
 
   // Няма автоматичен имейл, затова клиент със забравена парола се обажда на оператор,
@@ -530,11 +720,11 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (!client.identity.startsWith('local:')) throw new HttpError(422, 'Този клиент влиза с Google или Microsoft и няма парола.');
     const accountId = client.identity.slice('local:'.length);
     const link = await issueSetupLink('accounts', accountId);
-    return json(await deliverLink(client.loginEmail, 'Нова парола за портала на БУЛАДМИН', [
-      'Здравейте,',
-      '',
-      'Операторът на БУЛАДМИН Ви изпрати линк за нова парола:',
-    ], link));
+    return json(await deliverLink(client.loginEmail, 'Нова парола за портала на БУЛАДМИН', {
+      title: 'Нова парола',
+      paragraphs: ['По Ваша молба служител на БУЛАДМИН Ви изпрати линк за нова парола.'],
+      actionLabel: 'Задайте нова парола',
+    }, link));
   }
 
   // --- Клиентски данни (оператори) ---
@@ -609,12 +799,16 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         lastName: session.lastName,
       },
       client: client && publicClient(client),
-      operator: operator && { email: operator.id, name: operator.fullName, role: operator.role },
+      operator: operator && {
+        email: operator.id, name: operator.fullName, role: operator.role,
+        department: operator.department || '', jobTitle: operator.jobTitle || '', mfa: mfaRequired(operator),
+      },
     });
   }
 
   async function register(request) {
     const session = await requireSession(request);
+    requireVerified(session);
     if (await findClient(session)) throw new HttpError(409, 'Този акаунт вече е регистриран.');
     const { fields, errors } = validateRegistration(await readBody(request));
     failIfErrors(errors);
@@ -768,16 +962,14 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       reason,
       proposedValues: '',
     });
-    await sendMail(env.MAIL_NOREPLY, client.contactEmail, approve ? 'Промяната в данните Ви е одобрена' : 'Промяната в данните Ви е отказана', [
-      'Здравейте,',
-      '',
-      approve
-        ? `Одобрихме промяната на: ${change.changedFields}.`
-        : `Не можем да приемем промяната на: ${change.changedFields}.`,
-      ...(approve ? [] : [`Причина: ${reason}`]),
-      '',
-      `Вашите данни: ${env.PORTAL_ORIGIN}/account.html#/profile`,
-    ]);
+    await sendMail(env.MAIL_NOREPLY, client.contactEmail, approve ? 'Промяната в данните Ви е одобрена' : 'Промяната в данните Ви е отказана', {
+      title: approve ? 'Промяната е одобрена' : 'Промяната е отказана',
+      paragraphs: [approve
+        ? 'Прегледахме и одобрихме промяната в данните Ви. Новите данни вече са в сила.'
+        : 'Прегледахме промяната в данните Ви, но не можем да я приемем. Данните Ви остават както преди.'],
+      details: [['Променени полета', change.changedFields], ...(approve ? [] : [['Причина', reason]])],
+      action: { label: 'Вижте данните си', url: `${env.PORTAL_ORIGIN}/account.html#/profile` },
+    });
     return json({ ok: true });
   }
 
@@ -820,19 +1012,19 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       privacyStatus: 'Подадено',
     };
     await store.create('privacy', record);
-    await sendMail(env.MAIL_NOREPLY, env.MAIL_DPO, `Ново искание за лични данни ${record.id}`, [
-      `Право: ${rightType}`,
-      `Срок за отговор: ${record.dueAt.slice(0, 10)}`,
-      '',
-      `Обработка: ${env.PORTAL_ORIGIN}/admin.html#/privacy`,
-    ]);
-    await sendMail(env.MAIL_NOREPLY, client.contactEmail, `Искането Ви ${record.id} е получено`, [
-      'Здравейте,',
-      '',
-      `Получихме искането Ви: ${rightType}. Ще отговорим до ${record.dueAt.slice(0, 10)}.`,
-      '',
-      `Проследяване: ${env.PORTAL_ORIGIN}/account.html#/privacy`,
-    ]);
+    const due = formatDay(record.dueAt);
+    await sendMail(env.MAIL_NOREPLY, env.MAIL_DPO, `Ново искане за лични данни ${record.id}`, {
+      title: 'Ново искане за лични данни',
+      paragraphs: ['Постъпи искане по Регламент (ЕС) 2016/679 през клиентския портал. Описанието е видимо само в портала.'],
+      details: [['Номер', record.id], ['Право', rightType], ['Срок за отговор', due]],
+      action: { label: 'Обработете искането', url: `${env.PORTAL_ORIGIN}/admin.html#/privacy` },
+    });
+    await sendMail(env.MAIL_NOREPLY, client.contactEmail, `Искането Ви ${record.id} е получено`, {
+      title: 'Искането Ви е получено',
+      paragraphs: ['Получихме искането Ви, свързано с личните Ви данни. Ще Ви отговорим в законовия срок.'],
+      details: [['Номер', record.id], ['Право', rightType], ['Срок за отговор', due]],
+      action: { label: 'Проследете искането', url: `${env.PORTAL_ORIGIN}/account.html#/privacy` },
+    });
     return json({ request: publicPrivacy(record) }, 201);
   }
 
@@ -864,14 +1056,14 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       visibility: 'Вътрешно',
     });
     if (nextStatus !== record.privacyStatus) {
-      await sendMail(env.MAIL_NOREPLY, record.contactEmail, `Искане ${id}: статус „${nextStatus}“`, [
-        'Здравейте,',
-        '',
-        `Статусът на искането Ви (${record.rightType}) вече е „${nextStatus}“.`,
-        ...(patch.dueAt ? [`Новият срок за отговор е ${patch.dueAt.slice(0, 10)}.`] : []),
-        '',
-        `Подробности: ${env.PORTAL_ORIGIN}/account.html#/privacy`,
-      ]);
+      await sendMail(env.MAIL_NOREPLY, record.contactEmail, `Искане ${id}: статус „${nextStatus}“`, {
+        title: 'Ново състояние на искането Ви',
+        paragraphs: [patch.dueAt
+          ? 'Искането Ви изисква повече време за обработка, затова удължаваме срока, както позволява чл. 12, пар. 3 от Регламента.'
+          : `Искането Ви вече е в състояние „${nextStatus}“.`],
+        details: [['Номер', id], ['Право', record.rightType], ['Състояние', nextStatus], ...(patch.dueAt ? [['Нов срок', formatDay(patch.dueAt)]] : [])],
+        action: { label: 'Вижте подробностите', url: `${env.PORTAL_ORIGIN}/account.html#/privacy` },
+      });
     }
     return json({ request: { ...record, ...patch } });
   }
@@ -953,6 +1145,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       details,
       requestStatus: 'Нова',
       assignedTo: '',
+      department: await departmentForCategory(serviceCategory),
     };
     await store.create('requests', record);
     await addEvent({
@@ -963,13 +1156,16 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       toStatus: 'Нова',
       visibility: 'Клиент',
     });
-    await sendMail(env.MAIL_NOREPLY, client.contactEmail, `Заявка ${record.id} е приета`, [
-      'Здравейте,',
-      '',
-      `Получихме заявката Ви за „${service}“ с № ${record.id}. Ще се свържем с Вас, ако е нужно уточнение.`,
-      '',
-      `Проследяване: ${requestUrl(record.id)}`,
-    ]);
+    await sendMail(env.MAIL_NOREPLY, client.contactEmail, `Заявка ${record.id} е приета`, {
+      title: 'Заявката Ви е приета',
+      paragraphs: [
+        `Здравейте, ${record.clientName},`,
+        'Получихме заявката Ви и тя вече е в работа. При всяка промяна ще Ви изпращаме известие, а напредъка можете да следите по всяко време в портала.',
+      ],
+      status: 'Нова',
+      details: requestDetails(record),
+      action: { label: 'Проследете заявката', url: requestUrl(record.id) },
+    });
     return json({ request: publicRequest(record) }, 201);
   }
 
@@ -1017,11 +1213,12 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function adminOverview(request) {
     const viewer = requireOperator(await requireSession(request));
     const isAdmin = viewer.role === ADMIN_ROLE;
-    const [requests, clients, operators, changes, privacy] = await Promise.all([
+    const [requests, clients, operators, changes, departments, privacy] = await Promise.all([
       store.list('requests'),
       store.list('clients'),
       store.list('operators'),
       store.find('changes', 'changeStatus', 'Чака'),
+      store.list('departments'),
       isAdmin ? store.list('privacy') : [],
     ]);
     const clientById = new Map(clients.map((c) => [c.id, c]));
@@ -1030,7 +1227,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       privacy: isAdmin ? privacy.sort(byOldest('dueAt')) : undefined,
       requests: requests.sort(byNewest('createdAt')),
       clients: clients.sort(byNewest('createdAt')).map(publicClient),
-      operators: operators.filter((o) => o.isActive === 'Да').map((o) => ({ email: o.id, name: o.fullName })),
+      operators: operators.filter((o) => o.isActive === 'Да').map((o) => ({ email: o.id, name: o.fullName, department: o.department || '' })),
+      departments: departments.map(publicDepartment).sort((a, b) => a.name.localeCompare(b.name, 'bg')),
       team: viewer.role === ADMIN_ROLE ? operators.map(publicOperator) : undefined,
     });
   }
@@ -1070,6 +1268,11 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       }
       patch.assignedTo = body.assignedTo;
     }
+    if (body.department !== undefined && body.department !== (record.department || '')) {
+      const department = await validDepartment(body.department);
+      if (department === null) throw new HttpError(422, 'Изберете съществуващ отдел.');
+      patch.department = department;
+    }
     if (!Object.keys(patch).length) return json({ request: record });
 
     patch.updatedAt = nowIso();
@@ -1083,19 +1286,34 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         toStatus: patch.requestStatus,
         visibility: 'Клиент',
       });
-      await notifyClient(record.clientId, `Заявка ${id}: нов статус „${patch.requestStatus}“`, [
-        'Здравейте,',
-        '',
-        `Статусът на заявката Ви за „${record.service}“ вече е „${patch.requestStatus}“.`,
-        '',
-        `Подробности: ${requestUrl(id)}`,
-      ]);
+      const declined = patch.requestStatus === 'Отказана';
+      const done = patch.requestStatus === 'Получена';
+      await notifyClient(record.clientId, `Заявка ${id}: ${patch.requestStatus}`, {
+        title: declined ? 'Заявката Ви е отказана' : done ? 'Заявката Ви е изпълнена' : 'Заявката Ви напредва',
+        paragraphs: [declined
+          ? 'Не можем да изпълним заявката. Причината е описана в портала.'
+          : done
+            ? 'Документите по заявката са получени. Ще се свържем с Вас за предаването им, ако е нужно.'
+            : `Заявката Ви премина в етап „${patch.requestStatus}“. Ние продължаваме работата по нея.`],
+        status: patch.requestStatus,
+        details: requestDetails(record),
+        action: { label: 'Вижте заявката', url: requestUrl(id) },
+      });
     }
     if (patch.assignedTo !== undefined) {
       await addEvent({
         ...actor,
         requestId: id,
         action: patch.assignedTo ? `Възложена на ${patch.assignedTo}` : 'Отговорникът е премахнат',
+        visibility: 'Вътрешно',
+      });
+    }
+    if (patch.department !== undefined) {
+      const [department] = patch.department ? await store.find('departments', 'id', patch.department) : [];
+      await addEvent({
+        ...actor,
+        requestId: id,
+        action: department ? `Прехвърлена към отдел „${department.name}“` : 'Отделът е премахнат',
         visibility: 'Вътрешно',
       });
     }
@@ -1121,13 +1339,13 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     await store.update('requests', id, { updatedAt: nowIso() });
     // Самият текст остава в портала, а в имейла е само известието.
     if (!internal) {
-      await notifyClient(record.clientId, `Заявка ${id}: ново съобщение от БУЛАДМИН`, [
-        'Здравейте,',
-        '',
-        `Имате ново съобщение по заявката си за „${record.service}“.`,
-        '',
-        `Прочетете го тук: ${requestUrl(id)}`,
-      ]);
+      await notifyClient(record.clientId, `Заявка ${id}: ново съобщение от БУЛАДМИН`, {
+        title: 'Имате ново съобщение',
+        paragraphs: ['Служител на БУЛАДМИН Ви изпрати съобщение по заявката. От съображения за сигурност текстът се вижда само в портала.'],
+        status: record.requestStatus,
+        details: requestDetails(record),
+        action: { label: 'Прочетете съобщението', url: requestUrl(id) },
+      });
     }
     return json({ ok: true }, 201);
   }
@@ -1163,9 +1381,17 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (method === 'POST' && (m = path.match(/^\/api\/admin\/clients\/([\w-]{1,60})\/egn$/))) return adminRevealEgn(request, m[1]);
     if (method === 'GET' && (m = path.match(/^\/api\/auth\/(\w+)\/start$/)) && isProvider(m[1])) return authStart(m[1]);
     if (method === 'GET' && (m = path.match(/^\/api\/auth\/(\w+)\/callback$/)) && isProvider(m[1])) return authCallback(request, m[1], url);
+    // Всичко, което проверява пароли, кодове или линкове, минава през ограничението на опитите.
+    if (method === 'POST' && /^\/api\/auth\/(signup|login|operator-login|set-password|verify-email|resend-verification|forgot)$/.test(path)) {
+      await rateLimit(request, path.split('/').pop());
+    }
     if (method === 'POST' && path === '/api/auth/signup') return signup(request);
     if (method === 'POST' && path === '/api/auth/login') return passwordLogin(request, 'accounts');
     if (method === 'POST' && path === '/api/auth/operator-login') return passwordLogin(request, 'operators');
+    if (method === 'POST' && path === '/api/auth/operator-mfa') return verifyMfa(request);
+    if (method === 'POST' && path === '/api/auth/operator-mfa/resend') return resendMfa(request);
+    if (method === 'POST' && path === '/api/admin/departments') return createDepartment(request);
+    if (method === 'PATCH' && (m = path.match(/^\/api\/admin\/departments\/([\w-]{1,40})$/))) return updateDepartment(request, m[1]);
     if (method === 'POST' && path === '/api/auth/set-password') return setPasswordWithToken(request);
     if (method === 'POST' && path === '/api/account/password') return changePassword(request);
     if (method === 'POST' && (m = path.match(/^\/api\/account\/link\/(\w+)$/)) && isProvider(m[1])) return linkStart(request, m[1]);

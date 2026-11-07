@@ -8,7 +8,12 @@ const modeLogin = document.getElementById('mode-login');
 const modeSignup = document.getElementById('mode-signup');
 let signup = false;
 
-if (new URLSearchParams(location.search).get('error')) document.getElementById('login-error').hidden = false;
+const params = new URLSearchParams(location.search);
+if (params.get('error')) {
+  const box = document.getElementById('login-error');
+  if (params.get('error') === 'mfa') box.textContent = 'Не успяхме да изпратим кода за вход. Опитайте отново след малко.';
+  box.hidden = false;
+}
 
 function setMode(value) {
   signup = value;
@@ -29,18 +34,76 @@ function endpoint() {
   return signup ? '/auth/signup' : '/auth/login';
 }
 
+async function goHome() {
+  const me = await api('/me');
+  if (me.operator) location.replace('/admin.html');
+  else if (me.needsEmailVerification || !me.client) location.replace('/register.html');
+  else location.replace('/account.html');
+}
+
+// --- Втора стъпка за операторите: код по имейл ---
+
+const mfaForm = document.getElementById('mfa-form');
+const mfaAlert = document.getElementById('mfa-alert');
+
+function showMfa() {
+  document.getElementById('login-step').hidden = true;
+  document.getElementById('login-error').hidden = true;
+  mfaForm.hidden = false;
+  history.replaceState(null, '', location.pathname);
+  mfaForm.elements.code.focus();
+}
+
+mfaForm?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  mfaAlert.replaceChildren();
+  const button = document.getElementById('mfa-submit');
+  button.disabled = true;
+  try {
+    await api('/auth/operator-mfa', { method: 'POST', body: { code: mfaForm.elements.code.value.trim() } });
+    location.replace('/admin.html');
+  } catch (err) {
+    showFieldErrors(mfaForm, err.fields);
+    showError(mfaAlert, err.message);
+    if (err.status === 401) mfaForm.querySelector('.code-input').disabled = true;
+    button.disabled = false;
+  }
+});
+
+// Шестте цифри изпращат формата сами, без натискане на бутон.
+mfaForm?.elements.code.addEventListener('input', (event) => {
+  event.target.value = event.target.value.replace(/\D/g, '').slice(0, 6);
+  if (event.target.value.length === 6) mfaForm.requestSubmit();
+});
+
+document.getElementById('mfa-resend')?.addEventListener('click', async (event) => {
+  mfaAlert.replaceChildren();
+  event.target.disabled = true;
+  try {
+    await api('/auth/operator-mfa/resend', { method: 'POST' });
+    mfaAlert.replaceChildren(h('div', { class: 'alert alert--ok', role: 'status' }, 'Изпратихме нов код. Предишният вече не важи.'));
+  } catch (err) {
+    showError(mfaAlert, err.message);
+  }
+  setTimeout(() => { event.target.disabled = false; }, 60_000);
+});
+
+if (isOperatorPage && location.hash === '#mfa') showMfa();
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   alert.replaceChildren();
   submit.disabled = true;
   try {
-    await api(endpoint(), {
+    const result = await api(endpoint(), {
       method: 'POST',
       body: { email: form.elements.email.value, password: form.elements.password.value },
     });
-    const me = await api('/me');
-    if (me.operator) location.replace('/admin.html');
-    else location.replace(me.client ? '/account.html' : '/register.html');
+    if (result?.mfaRequired) {
+      showMfa();
+      return;
+    }
+    await goHome();
   } catch (err) {
     showFieldErrors(form, err.fields);
     showError(alert, err.message);
@@ -79,5 +142,5 @@ forgotButton?.addEventListener('click', async () => {
 api('/me').then((me) => {
   if (!me.authenticated) return;
   if (me.operator) location.replace('/admin.html');
-  else if (!isOperatorPage) location.replace(me.client ? '/account.html' : '/register.html');
+  else if (!isOperatorPage) location.replace(me.needsEmailVerification || !me.client ? '/register.html' : '/account.html');
 }).catch(() => { /* формата за вход остава видима */ });

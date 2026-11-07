@@ -36,19 +36,24 @@ const seedCompany = {
   firstName: '', lastName: '', egn: '', companyName: 'Пример ЕООД', eik: '123456786', vatNumber: 'BG123456786',
   representative: 'Иван Иванов', contactEmail: 'office@example.com', city: 'Варна', address: 'бул. Примерен 2',
 };
+const DEMO_DEPARTMENTS = { 'Имоти': 'D-DEMO1', 'Наследства': 'D-DEMO1', 'Регистрации и разрешения': 'D-DEMO2', 'Обслужване на фирми': 'D-DEMO2' };
 const req = (id, client, serviceCategory, service, details, requestStatus, assignedTo, days) => ({
   id, createdAt: at(days), updatedAt: at(days), clientId: client.id, clientName: client.companyName || `${client.firstName} ${client.lastName}`,
-  personType: client.personType, serviceCategory, service, details, requestStatus, assignedTo,
+  personType: client.personType, serviceCategory, service, details, requestStatus, assignedTo, department: DEMO_DEPARTMENTS[serviceCategory] || '',
 });
 const store = new MemoryStore({
   operators: [
-    { id: 'operator@buladmin.eu', fullName: 'Демо Оператор', isActive: 'Да', role: 'Администратор', sessionVersion: '0' },
-    { id: 'kolega@buladmin.eu', fullName: 'Демо Колега', isActive: 'Да', role: 'Оператор', sessionVersion: '0' },
+    { id: 'operator@buladmin.eu', fullName: 'Демо Оператор', isActive: 'Да', role: 'Администратор', sessionVersion: '0', department: 'D-DEMO1', jobTitle: 'Управител' },
+    { id: 'kolega@buladmin.eu', fullName: 'Демо Колега', isActive: 'Да', role: 'Оператор', sessionVersion: '0', department: 'D-DEMO2', jobTitle: 'Експерт' },
     // Вход с парола: отворете /set-password.html#t=o.dev-setup
     {
       id: 'nov@buladmin.eu', fullName: 'Нов Оператор', isActive: 'Да', role: 'Оператор', sessionVersion: '0',
       resetTokenHash: b64url(await sha256(DEV_SETUP_TOKEN)), resetExpires: new Date(Date.now() + 864e5).toISOString(),
     },
+  ],
+  departments: [
+    { id: 'D-DEMO1', createdAt: at(30), name: 'Имоти и наследства', categories: '["Имоти","Наследства"]', isActive: 'Да' },
+    { id: 'D-DEMO2', createdAt: at(30), name: 'Фирми и регистрации', categories: '["Регистрации и разрешения","Обслужване на фирми"]', isActive: 'Да' },
   ],
   clients: [seedClient, seedCompany],
   requests: [

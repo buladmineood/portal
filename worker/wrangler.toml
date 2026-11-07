@@ -17,3 +17,9 @@ MAIL_ENABLED = "true"
 MAIL_ACCOUNTS = "accounts@portal.buladmin.eu"
 MAIL_NOREPLY = "no-reply@portal.buladmin.eu"
 MAIL_DPO = "dpo@buladmin.eu"
+
+# Ограничение на опитите за вход, регистрация и кодове: до 20 заявки в минута от един IP адрес за всеки вид.
+[[ratelimits]]
+name = "LOGIN_LIMITER"
+namespace_id = "1001"
+simple = { limit = 20, period = 60 }

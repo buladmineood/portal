@@ -108,13 +108,13 @@ export class GraphStore {
     return record;
   }
 
-  sendMail(from, to, subject, text) {
+  sendMail(from, to, subject, { html }) {
     return this.request(`${GRAPH}/users/${encodeURIComponent(from)}/sendMail`, {
       method: 'POST',
       body: JSON.stringify({
         message: {
           subject,
-          body: { contentType: 'Text', content: text },
+          body: { contentType: 'HTML', content: html },
           toRecipients: [{ emailAddress: { address: to } }],
         },
         saveToSentItems: false,
@@ -135,10 +135,10 @@ export class GraphStore {
 // За тестове и локална разработка; не се използва в production.
 export class MemoryStore {
   constructor(seed = {}) {
-    this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], changes: [], privacy: [], ...seed };
+    this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], changes: [], privacy: [], departments: [], ...seed };
     this.sentMail = [];
   }
-  async sendMail(from, to, subject, text) { this.sentMail.push({ from, to, subject, text }); }
+  async sendMail(from, to, subject, { html, text }) { this.sentMail.push({ from, to, subject, text, html }); }
   async list(table) { return this.tables[table].map((r) => ({ ...r })); }
   async find(table, field, value) { return (await this.list(table)).filter((r) => r[field] === value); }
   async create(table, record) { this.tables[table].push({ ...record }); return record; }

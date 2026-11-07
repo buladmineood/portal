@@ -489,6 +489,19 @@ td a { font-weight: 600; }
 .loading { padding: 40px 0; text-align: center; color: var(--ink-2); }
 .side-sticky { position: sticky; top: 20px; }
 .theme-btn { margin-left: auto; }
+.filters--4 { grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)); }
+.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 16px; }
+.field label.check span, .check span { font-weight: 400; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag { padding: 2px 10px; border-radius: 99px; background: var(--tint); color: var(--ink); font-size: .82rem; }
+.card--muted { opacity: .7; }
+.verify-card { display: grid; justify-items: start; gap: 14px; }
+.verify-card .steps { margin-top: 0; }
+.steps--light b { background: var(--tint); color: var(--gold-ink); }
+.code-input { font-size: 1.6rem !important; letter-spacing: .4em; text-align: center; font-variant-numeric: tabular-nums; }
+.dialog .form { gap: 14px; }
+.dialog .form h2 { font-size: 1.15rem; }
+.dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; }
 .app__user-actions { display: flex; flex: none; }
 .app__live { display: flex; align-items: center; gap: 7px; padding: 0 8px; font-size: .76rem; color: rgb(255 255 255 / .68); }
 .live-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #7fdcae; }
@@ -534,6 +547,7 @@ td a:hover { text-decoration: underline; }
 @media (max-width: 860px) {
   .side-sticky { position: static; }
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .filters--4 { grid-template-columns: minmax(0, 1fr); }
   .app { display: block; padding-bottom: 72px; }
   .app__top {
     display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px 8px var(--gutter);

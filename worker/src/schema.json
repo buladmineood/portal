@@ -42,7 +42,8 @@
       { "name": "service", "label": "Услуга", "kind": "text" },
       { "name": "details", "label": "Описание", "kind": "multiline" },
       { "name": "requestStatus", "label": "Статус", "kind": "choice", "choices": ["Нова", "Уточняване", "Подготвена", "Подадена", "Проследява се", "Получена", "Отказана"], "indexed": true },
-      { "name": "assignedTo", "label": "Отговорен оператор", "kind": "text", "indexed": true }
+      { "name": "assignedTo", "label": "Отговорен оператор", "kind": "text", "indexed": true },
+      { "name": "department", "label": "Отдел", "kind": "text", "indexed": true }
     ]
   },
   "events": {
@@ -67,6 +68,13 @@
       { "name": "fullName", "label": "Име", "kind": "text" },
       { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] },
       { "name": "role", "label": "Роля", "kind": "choice", "choices": ["Администратор", "Оператор"] },
+      { "name": "department", "label": "Отдел", "kind": "text" },
+      { "name": "jobTitle", "label": "Длъжност", "kind": "text" },
+      { "name": "mfaEnabled", "label": "Код по имейл при вход", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "mfaCodeHash", "label": "Хеш на кода за вход", "kind": "text" },
+      { "name": "mfaExpires", "label": "Кодът изтича", "kind": "text" },
+      { "name": "mfaAttempts", "label": "Опити с код", "kind": "text" },
+      { "name": "mfaSentAt", "label": "Кодът е изпратен", "kind": "text" },
       { "name": "passwordHash", "label": "Хеш на паролата", "kind": "text" },
       { "name": "sessionVersion", "label": "Версия на сесията", "kind": "text" },
       { "name": "failedLogins", "label": "Грешни опити", "kind": "text" },
@@ -76,6 +84,16 @@
       { "name": "resetSentAt", "label": "Линкът е издаден", "kind": "text" },
       { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
       { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true }
+    ]
+  },
+  "departments": {
+    "title": "Портал - Отдели",
+    "titleLabel": "ID отдел",
+    "columns": [
+      { "name": "createdAt", "label": "Създаден", "kind": "date" },
+      { "name": "name", "label": "Име", "kind": "text" },
+      { "name": "categories", "label": "Категории услуги", "kind": "multiline" },
+      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] }
     ]
   },
   "changes": {

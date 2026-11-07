@@ -28,6 +28,15 @@ export function randomCode(length = 8) {
   return out.join('');
 }
 
+// Шестцифрен код; стойностите над най-голямото кратно на милион се отхвърлят, за да няма отклонение.
+export function randomDigits() {
+  const LIMIT = 4_294_000_000;
+  for (;;) {
+    const [value] = crypto.getRandomValues(new Uint32Array(1));
+    if (value < LIMIT) return String(value % 1_000_000).padStart(6, '0');
+  }
+}
+
 export async function sha256(text) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(text)));
 }

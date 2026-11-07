@@ -1,5 +1,5 @@
 import {
-  api, canRefreshNow, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatTime, formValues, h, icon, identityFields, linkBox,
+  api, canRefreshNow, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatTime, formDialog, formValues, h, icon, identityFields, linkBox,
   loginLabel, markClean, markDirty, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill,
   timeAgo, toast,
 } from './core.js';
@@ -19,9 +19,16 @@ const PRIVACY_CLOSED = ['Изпълнено', 'Отказано'];
 const ACTIVE_STATUSES = ['Нова', 'Уточняване', 'Подготвена', 'Подадена', 'Проследява се'];
 const FLOW = ['Нова', 'Уточняване', 'Подготвена', 'Подадена', 'Проследява се', 'Получена'];
 const DUE_SOON_DAYS = 7;
-const filters = { status: '', category: '', owner: '', q: '', page: 1, sort: 'createdAt', dir: -1 };
+const filters = { status: '', category: '', owner: '', department: '', q: '', page: 1, sort: 'createdAt', dir: -1 };
 
 const isAdmin = () => me.operator.role === 'Администратор';
+const departmentName = (id) => data?.departments?.find((d) => d.id === id)?.name || '';
+function departmentSelect(name, selected, id) {
+  return h('select', { id, name },
+    h('option', { value: '' }, 'Без отдел'),
+    (data.departments || []).filter((d) => d.isActive === 'Да' || d.id === selected)
+      .map((d) => h('option', { value: d.id, selected: d.id === selected }, d.isActive === 'Да' ? d.name : `${d.name} (неактивен)`)));
+}
 const operatorName = (email) => data.operators.find((o) => o.email === email)?.name || email;
 const norm = (s) => String(s || '').toLocaleLowerCase('bg');
 const fullName = (c) => c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ');
@@ -83,13 +90,17 @@ function viewDashboard() {
   const privacy = openPrivacy();
   const overdue = privacy.filter(isOverdue);
   const dueSoon = privacy.filter((p) => !isOverdue(p) && daysLeft(p.dueAt) <= DUE_SOON_DAYS);
+  const myDepartment = me.operator.department;
+  const departmentActive = myDepartment
+    ? data.requests.filter((r) => r.department === myDepartment && ACTIVE_STATUSES.includes(r.requestStatus))
+    : [];
 
   const panel = (title, href, rows, emptyText) => h('section', { class: 'card card--list' },
     h('div', { class: 'card__head' }, h('h2', {}, title), h('a', { class: 'small', href }, 'Всички')),
     rows.length ? h('div', { class: 'compact-list' }, rows.slice(0, 6).map(compactRow)) : h('p', { class: 'muted small card__empty' }, emptyText));
 
   page(
-    pageHead(`Здравейте, ${me.operator.name}`, 'Какво чака действие от Вас днес.'),
+    pageHead(`Здравейте, ${me.operator.name}`, myDepartment ? `Отдел „${departmentName(myDepartment)}“ · какво чака действие днес.` : 'Какво чака действие от Вас днес.'),
     overdue.length > 0 && h('a', { class: 'alert alert--error banner banner--link', href: '#/privacy' }, icon('alert'),
       h('div', { class: 'banner__text' },
         h('strong', {}, `Просрочени искания за лични данни: ${overdue.length}`),
@@ -98,6 +109,7 @@ function viewDashboard() {
       kpi('inbox', 'Нови заявки', fresh.length, '#/requests?status=Нова', fresh.length ? 'kpi--accent' : ''),
       kpi('alert', 'Без отговорник', unassigned.length, '#/requests?owner=none', unassigned.length ? 'kpi--warn' : ''),
       kpi('user', 'Възложени на мен', mine.length, '#/requests?owner=me'),
+      myDepartment && kpi('building', 'Активни в моя отдел', departmentActive.length, '#/requests?dept=mine'),
       kpi('check', 'Чакат одобрение', data.changes.length, '#/changes', data.changes.length ? 'kpi--warn' : ''),
       data.privacy && kpi('shield', 'Искания за лични данни', privacy.length, '#/privacy', overdue.length ? 'kpi--danger' : dueSoon.length ? 'kpi--warn' : '')),
     h('div', { class: 'grid-2' },
@@ -111,6 +123,9 @@ function viewDashboard() {
 function matches(r) {
   if (filters.status && r.requestStatus !== filters.status) return false;
   if (filters.category && r.serviceCategory !== filters.category) return false;
+  if (filters.department === 'mine' && r.department !== me.operator.department) return false;
+  if (filters.department === 'none' && r.department) return false;
+  if (filters.department && !['mine', 'none'].includes(filters.department) && r.department !== filters.department) return false;
   if (filters.owner === 'none' && r.assignedTo) return false;
   if (filters.owner === 'me' && r.assignedTo !== me.operator.email) return false;
   if (filters.owner && !['none', 'me'].includes(filters.owner) && r.assignedTo !== filters.owner) return false;
@@ -127,6 +142,7 @@ function viewRequests(query) {
   if (query) {
     filters.status = query.get('status') || '';
     filters.owner = query.get('owner') || '';
+    filters.department = query.get('dept') || '';
     filters.category = '';
     filters.q = '';
     filters.page = 1;
@@ -190,7 +206,8 @@ function viewRequests(query) {
           h('td', { 'data-label': 'Клиент' }, r.clientName, h('div', { class: 'small muted' }, r.personType)),
           h('td', { 'data-label': 'Услуга' }, r.service, h('div', { class: 'small muted' }, r.serviceCategory)),
           h('td', {}, statusPill(r.requestStatus)),
-          h('td', { 'data-label': 'Отговорен' }, r.assignedTo ? operatorName(r.assignedTo) : h('span', { class: 'muted' }, 'няма')),
+          h('td', { 'data-label': 'Отговорен' }, r.assignedTo ? operatorName(r.assignedTo) : h('span', { class: 'muted' }, 'няма'),
+            r.department && h('div', { class: 'small muted' }, departmentName(r.department))),
           h('td', { 'data-label': 'Подадена', title: formatTime(r.createdAt) }, timeAgo(r.createdAt))))))),
       pages > 1 && h('nav', { class: 'pager', 'aria-label': 'Страници' },
         h('button', { class: 'btn btn--ghost btn--small', type: 'button', disabled: filters.page === 1, onclick: () => { filters.page -= 1; render(); window.scrollTo(0, 0); } }, 'Предишна'),
@@ -227,11 +244,23 @@ function viewRequests(query) {
     h('option', { value: 'me', selected: filters.owner === 'me' }, 'Възложени на мен'),
     h('option', { value: 'none', selected: filters.owner === 'none' }, 'Без отговорник'),
     data.operators.filter((o) => o.email !== me.operator.email).map((o) => h('option', { value: o.email, selected: filters.owner === o.email }, o.name)));
+  const department = data.departments.length > 0 && h('select', {
+    'aria-label': 'Отдел',
+    onchange: (event) => {
+      filters.department = event.target.value;
+      filters.page = 1;
+      render();
+    },
+  },
+    h('option', { value: '' }, 'Всички отдели'),
+    me.operator.department && h('option', { value: 'mine', selected: filters.department === 'mine' }, 'Моят отдел'),
+    h('option', { value: 'none', selected: filters.department === 'none' }, 'Без отдел'),
+    data.departments.map((d) => h('option', { value: d.id, selected: filters.department === d.id }, d.name)));
 
   page(
     pageHead('Заявки', `${data.requests.length} общо`),
     chips,
-    h('div', { class: 'filters' }, h('div', { class: 'search' }, icon('search', 18), search), category, owner),
+    h('div', { class: `filters ${department ? 'filters--4' : ''}` }, h('div', { class: 'search' }, icon('search', 18), search), category, department, owner),
     results,
   );
   render();
@@ -297,7 +326,12 @@ async function viewRequest(id) {
     onchange: () => save({ assignedTo: assigned.value }, assigned.value ? `Възложена на ${operatorName(assigned.value)}.` : 'Отговорникът е премахнат.'),
   },
     h('option', { value: '' }, 'Без отговорник'),
-    data.operators.map((o) => h('option', { value: o.email, selected: o.email === r.assignedTo }, o.name)));
+    data.operators.map((o) => h('option', { value: o.email, selected: o.email === r.assignedTo }, departmentName(o.department) ? `${o.name} · ${departmentName(o.department)}` : o.name)));
+  const departmentPicker = data.departments.length > 0 && departmentSelect('department', r.department || '', 'f-department');
+  departmentPicker?.addEventListener?.('change', () => save(
+    { department: departmentPicker.value },
+    departmentPicker.value ? `Прехвърлена към „${departmentName(departmentPicker.value)}“.` : 'Отделът е премахнат.',
+  ));
 
   const msgAlert = h('div', { 'aria-live': 'polite' });
   const send = h('button', { class: 'btn', type: 'submit' }, 'Добавете бележката');
@@ -358,6 +392,7 @@ async function viewRequest(id) {
           nextStatus && h('button', { class: 'btn btn--wide', type: 'button', onclick: () => save({ requestStatus: nextStatus }, `Статусът е променен на „${nextStatus}“.`) }, 'Следващ етап: ', nextStatus, icon('arrow', 18)),
           !r.assignedTo && h('button', { class: 'btn btn--ghost btn--wide', type: 'button', onclick: () => save({ assignedTo: me.operator.email }, 'Поехте заявката.') }, 'Поемам я'),
           h('div', { class: 'field' }, h('label', { for: 'f-status' }, 'Статус'), status),
+          departmentPicker && h('div', { class: 'field' }, h('label', { for: 'f-department' }, 'Отдел'), departmentPicker),
           h('div', { class: 'field' }, h('label', { for: 'f-assigned' }, 'Отговорен оператор'), assigned),
           h('p', { class: 'small muted row-tight' }, `№ ${r.id}`, copyButton(r.id, 'Копирайте номера'))),
         h('div', { class: 'card' }, h('h2', { class: 'card__title' }, 'Клиент'), clientCard(detail.client)))),
@@ -656,9 +691,96 @@ function viewPrivacyRequests() {
 // --- Оператори и личен акаунт ---
 
 function viewMe() {
+  const op = me.operator;
   page(
-    pageHead('Моят акаунт', `${me.operator.email} · ${me.operator.role}`),
-    h('div', { class: 'stack narrow' }, securityCards(me.security)),
+    pageHead('Моят акаунт', [op.jobTitle, departmentName(op.department), op.role].filter(Boolean).join(' · ')),
+    h('div', { class: 'stack narrow' },
+      h('div', { class: `alert ${op.mfa ? 'alert--ok' : 'alert--warn'} banner` }, icon('lock'),
+        h('div', { class: 'banner__text' },
+          h('strong', {}, op.mfa ? 'Входът е защитен с код по имейл' : 'Входът не е защитен с код по имейл'),
+          h('p', {}, op.mfa
+            ? `При всеки вход изпращаме 6-цифрен код на ${op.email}, включително при вход с Google или Microsoft.`
+            : 'Помолете администратор да включи кода по имейл за Вашия акаунт.'))),
+      securityCards(me.security)),
+  );
+}
+
+// --- Настройки: отдели ---
+
+function departmentFields(d = {}) {
+  return [
+    h('div', { class: 'field' }, h('label', { for: 'f-dept-name' }, 'Име на отдела'),
+      h('input', { id: 'f-dept-name', name: 'name', type: 'text', maxlength: 100, value: d.name })),
+    h('fieldset', { class: 'field' },
+      h('legend', {}, 'Кои категории услуги обработва'),
+      h('p', { class: 'small muted', style: 'margin-bottom:8px' }, 'Новите заявки от тези категории отиват автоматично в отдела.'),
+      h('div', { class: 'check-grid' }, meta.catalog.map((c) => h('label', { class: 'check' },
+        h('input', { type: 'checkbox', name: 'categories', value: c.name, checked: (d.categories || []).includes(c.name) }),
+        h('span', {}, c.name))))),
+  ];
+}
+const checkedCategories = (form) => [...form.querySelectorAll('input[name=categories]:checked')].map((i) => i.value);
+
+function viewSettings() {
+  const taken = (category, except) => data.departments.find((d) => d.id !== except && d.isActive === 'Да' && d.categories.includes(category));
+  const uncovered = meta.catalog.filter((c) => !taken(c.name)).map((c) => c.name);
+
+  const card = (d) => h('article', { class: `card stack-tight ${d.isActive === 'Да' ? '' : 'card--muted'}` },
+    h('div', { class: 'card__head card__head--plain' },
+      h('h2', {}, d.name),
+      h('span', { class: 'small muted' }, `${data.team.filter((o) => o.department === d.id && o.isActive === 'Да').length} оператори`)),
+    d.categories.length
+      ? h('div', { class: 'tags' }, d.categories.map((c) => h('span', { class: 'tag' }, c)))
+      : h('p', { class: 'small muted' }, 'Не получава заявки автоматично.'),
+    d.isActive !== 'Да' && h('p', { class: 'small muted' }, 'Неактивен: не получава нови заявки.'),
+    h('div', { class: 'row' },
+      h('button', {
+        class: 'link-btn small', type: 'button',
+        onclick: async () => {
+          const saved = await formDialog({
+            title: 'Редакция на отдел', fields: departmentFields(d),
+            onSubmit: (values, form) => api(`/admin/departments/${encodeURIComponent(d.id)}`, { method: 'PATCH', body: { name: values.name, categories: checkedCategories(form) } }),
+          });
+          if (!saved) return;
+          toast('Отделът е запазен.');
+          await refresh();
+          viewSettings();
+        },
+      }, 'Редактирайте'),
+      h('button', {
+        class: 'link-btn small', type: 'button',
+        onclick: async () => {
+          const deactivate = d.isActive === 'Да';
+          if (deactivate && !(await confirmDialog({
+            title: 'Деактивиране на отдел', text: 'Отделът няма да получава нови заявки. Досегашните заявки и операторите му остават непроменени.', confirmLabel: 'Деактивирайте', danger: true,
+          }))) return;
+          await api(`/admin/departments/${encodeURIComponent(d.id)}`, { method: 'PATCH', body: { isActive: deactivate ? 'Не' : 'Да' } });
+          toast(deactivate ? 'Отделът е деактивиран.' : 'Отделът е активиран.');
+          await refresh();
+          viewSettings();
+        },
+      }, d.isActive === 'Да' ? 'Деактивирайте' : 'Активирайте')));
+
+  page(
+    pageHead('Настройки', 'Отдели и насочване на заявките.',
+      h('button', {
+        class: 'btn', type: 'button',
+        onclick: async () => {
+          const saved = await formDialog({
+            title: 'Нов отдел', fields: departmentFields(), submitLabel: 'Създайте',
+            onSubmit: (values, form) => api('/admin/departments', { method: 'POST', body: { name: values.name, categories: checkedCategories(form) } }),
+          });
+          if (!saved) return;
+          toast('Отделът е създаден.');
+          await refresh();
+          viewSettings();
+        },
+      }, icon('plus', 18), 'Нов отдел')),
+    uncovered.length > 0 && data.departments.length > 0 && h('div', { class: 'alert alert--warn banner' }, icon('alert'),
+      h('div', { class: 'banner__text' }, h('strong', {}, 'Категории без отдел'), h('p', {}, `${uncovered.join(', ')}. Заявките от тях остават без отдел, докато някой не ги прехвърли.`))),
+    data.departments.length
+      ? h('div', { class: 'grid-2' }, data.departments.map(card))
+      : emptyState('building', 'Още няма отдели', 'Създайте отдели, за да насочвате заявките автоматично и да разпределяте операторите.'),
   );
 }
 
@@ -668,7 +790,7 @@ function viewOperators() {
 
   function renderTable() {
     tableBox.replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Оператор', 'Роля', 'Състояние', 'Свързан с', 'Действия'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('thead', {}, h('tr', {}, ['Оператор', 'Отдел', 'Роля', 'Състояние', 'Код при вход', 'Действия'].map((t) => h('th', { scope: 'col' }, t)))),
       h('tbody', {}, data.team.map((o) => {
         const isMe = o.email === me.operator.email;
         const act = (label, fn) => h('button', {
@@ -685,12 +807,42 @@ function viewOperators() {
         const url = `/admin/operators/${encodeURIComponent(o.email)}`;
         const linked = [o.google && 'Google', o.microsoft && 'Microsoft'].filter(Boolean).join(', ');
         const state = o.isActive !== 'Да' ? 'Деактивиран' : o.pendingSetup ? 'Очаква парола' : 'Активен';
+        const edit = act('Редактирайте', async () => {
+          const saved = await formDialog({
+            title: `Редакция: ${o.name}`,
+            fields: [
+              h('div', { class: 'field' }, h('label', { for: 'f-op-dept' }, 'Отдел'), departmentSelect('department', o.department, 'f-op-dept')),
+              h('div', { class: 'field' }, h('label', { for: 'f-op-title' }, 'Длъжност'), h('input', { id: 'f-op-title', name: 'jobTitle', type: 'text', maxlength: 100, value: o.jobTitle })),
+              !isMe && h('div', { class: 'field' }, h('label', { for: 'f-op-role' }, 'Роля'), h('select', { id: 'f-op-role', name: 'role' },
+                ['Оператор', 'Администратор'].map((r) => h('option', { value: r, selected: o.role === r }, r)))),
+              !isMe && h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'mfa', checked: o.mfa }),
+                h('span', {}, 'Код по имейл при всеки вход (препоръчително)')),
+              isMe && h('p', { class: 'small muted' }, 'Ролята и защитата на собствения си акаунт може да промени само друг администратор.'),
+            ],
+            onSubmit: (values, form) => {
+              const body = { department: values.department, jobTitle: values.jobTitle };
+              if (!isMe) {
+                body.role = values.role;
+                body.mfaEnabled = form.elements.mfa.checked ? 'Да' : 'Не';
+              }
+              return api(url, { method: 'PATCH', body });
+            },
+          });
+          if (!saved) return;
+          toast('Операторът е запазен.');
+          await refresh();
+          if (isMe) me = await api('/me');
+          renderTable();
+        });
         return h('tr', {},
-          h('td', {}, h('strong', {}, o.name), h('div', { class: 'small muted' }, o.email)),
+          h('td', {}, h('strong', {}, o.name), h('div', { class: 'small muted' }, [o.jobTitle, o.email].filter(Boolean).join(' · '))),
+          h('td', { 'data-label': 'Отдел' }, departmentName(o.department) || h('span', { class: 'muted' }, '–')),
           h('td', { 'data-label': 'Роля' }, o.role),
-          h('td', { 'data-label': 'Състояние' }, h('span', { class: `dot dot--${o.isActive !== 'Да' ? 'off' : o.pendingSetup ? 'wait' : 'on'}` }), state),
-          h('td', { 'data-label': 'Свързан с' }, linked || '–'),
-          h('td', {}, isMe ? h('span', { class: 'muted small' }, 'Това сте Вие') : h('div', { class: 'row' },
+          h('td', { 'data-label': 'Състояние' }, h('span', { class: `dot dot--${o.isActive !== 'Да' ? 'off' : o.pendingSetup ? 'wait' : 'on'}` }), state,
+            linked && h('div', { class: 'small muted' }, `Свързан с ${linked}`)),
+          h('td', { 'data-label': 'Код при вход' }, o.mfa ? h('span', { class: 'row-tight' }, icon('lock', 16), 'Включен') : h('span', { class: 'text-error' }, 'Изключен')),
+          h('td', {}, isMe ? h('div', { class: 'row' }, edit) : h('div', { class: 'row' },
+            edit,
             act('Линк за парола', async () => {
               const result = await api(`${url}/reset`, { method: 'POST' });
               showDelivery(notice, result, `Линк за задаване на парола за ${o.email}.`);
@@ -717,7 +869,10 @@ function viewOperators() {
       h('div', { class: 'field' }, h('label', { for: 'f-fullName' }, 'Име'), h('input', { id: 'f-fullName', name: 'fullName', type: 'text', maxlength: 160 })),
       h('div', { class: 'field' }, h('label', { for: 'f-email' }, 'Имейл за вход'), h('input', { id: 'f-email', name: 'email', type: 'email', maxlength: 200 })),
       h('div', { class: 'field' }, h('label', { for: 'f-role' }, 'Роля'), h('select', { id: 'f-role', name: 'role' },
-        h('option', { value: 'Оператор' }, 'Оператор'), h('option', { value: 'Администратор' }, 'Администратор')))),
+        h('option', { value: 'Оператор' }, 'Оператор'), h('option', { value: 'Администратор' }, 'Администратор'))),
+      h('div', { class: 'field' }, h('label', { for: 'f-department' }, 'Отдел'), departmentSelect('department', '', 'f-department')),
+      h('div', { class: 'field full' }, h('label', { for: 'f-jobTitle' }, 'Длъжност'), h('input', { id: 'f-jobTitle', name: 'jobTitle', type: 'text', maxlength: 100 }))),
+    h('p', { class: 'small muted' }, 'Новите оператори влизат с парола и код по имейл. Поканата се изпраща на служебния им адрес.'),
     h('div', {}, submit));
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -765,6 +920,7 @@ async function route() {
     else if (path === '/changes') viewChanges();
     else if (path === '/privacy' && data.privacy) viewPrivacyRequests();
     else if (path === '/operators' && data.team) viewOperators();
+    else if (path === '/settings' && data.team) viewSettings();
     else if (path === '/me') viewMe();
     else viewDashboard();
   } catch (err) {
@@ -842,6 +998,7 @@ async function init() {
       ...(isAdmin() ? [
         { key: 'privacy', href: '#/privacy', label: 'Лични данни', icon: 'shield', match: /^\/privacy$/ },
         { key: 'operators', href: '#/operators', label: 'Оператори', icon: 'team', match: /^\/operators$/ },
+        { key: 'settings', href: '#/settings', label: 'Настройки', icon: 'settings', match: /^\/settings$/ },
       ] : []),
       { key: 'me', href: '#/me', label: 'Моят акаунт', icon: 'user', match: /^\/me$/ },
     ],
