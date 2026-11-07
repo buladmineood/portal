@@ -1,11 +1,11 @@
-import { b64url, b64urlDecode, randomToken, sha256 } from './crypto.js';
+import { b64url, b64urlDecode, CLIENT_ASSERTION_TYPE, clientAssertion, randomToken, sha256 } from './crypto.js';
 
 const PROVIDERS = {
   google: {
     authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: 'https://oauth2.googleapis.com/token',
     clientId: (env) => env.GOOGLE_CLIENT_ID,
-    clientSecret: (env) => env.GOOGLE_CLIENT_SECRET,
+    clientAuth: async (env) => ({ client_secret: env.GOOGLE_CLIENT_SECRET }),
     issuerOk: (c) => c.iss === 'https://accounts.google.com' || c.iss === 'accounts.google.com',
     identity: (c) => ({
       sub: `google:${c.sub}`,
@@ -21,7 +21,10 @@ const PROVIDERS = {
     authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
     tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
     clientId: (env) => env.MS_CLIENT_ID,
-    clientSecret: (env) => env.MS_CLIENT_SECRET,
+    clientAuth: async (env, nowMs) => ({
+      client_assertion_type: CLIENT_ASSERTION_TYPE,
+      client_assertion: await clientAssertion(env, PROVIDERS.microsoft.tokenUrl, nowMs),
+    }),
     issuerOk: (c) => !!c.tid && c.iss === `https://login.microsoftonline.com/${c.tid}/v2.0`,
     // Идентичността е tid+sub, никога имейл: имейлът в Microsoft акаунт може да се сменя и не е доказателство за притежание.
     identity: (c) => ({
@@ -75,7 +78,7 @@ export async function completeLogin(env, provider, flow, code, fetchImpl, nowMs 
       grant_type: 'authorization_code',
       code,
       client_id: p.clientId(env),
-      client_secret: p.clientSecret(env),
+      ...(await p.clientAuth(env, nowMs)),
       redirect_uri: redirectUri(env, provider),
       code_verifier: flow.verifier,
     }),

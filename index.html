@@ -27,8 +27,20 @@
   </section>
   <section class="card login__card" aria-labelledby="signin-title">
     <h2 id="signin-title">Вход и регистрация</h2>
-    <p class="muted small">Няма нова парола за помнене. При първия вход ще попълните данните си.</p>
+    <div class="segmented" role="group" aria-label="Вход или регистрация">
+      <button type="button" id="mode-login" aria-pressed="true">Вход</button>
+      <button type="button" id="mode-signup" aria-pressed="false">Нова регистрация</button>
+    </div>
     <div id="login-error" class="alert alert--error" role="alert" hidden>Входът не успя. Опитайте отново или пишете на call@buladmin.eu.</div>
+    <form id="login-form" class="form" novalidate>
+      <div class="field"><label for="f-email">Имейл</label><input id="f-email" name="email" type="email" autocomplete="username" maxlength="200" required></div>
+      <div class="field"><label for="f-password">Парола</label><input id="f-password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+        <div id="password-hint" class="small muted" hidden>Поне 10 знака.</div></div>
+      <div id="form-alert" aria-live="polite"></div>
+      <button class="btn" type="submit" id="login-submit">Вход</button>
+    </form>
+    <p id="forgot-note" class="login__note">Забравена парола? Пишете на <a href="mailto:call@buladmin.eu">call@buladmin.eu</a> и ще Ви изпратим линк за нова.</p>
+    <div class="divider"><span>или</span></div>
     <a class="btn btn--provider" href="/api/auth/google/start">
       <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.7 1.2 9.2 3.6l6.9-6.9C35.9 2.4 30.5 0 24 0 14.6 0 6.5 5.4 2.6 13.2l8 6.2C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.9 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.9c-.6 3-2.2 5.5-4.7 7.2l7.3 5.7c4.3-4 6.4-9.8 6.4-17.4z"/><path fill="#FBBC05" d="M10.6 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-8-6.2C.9 16.5 0 20.1 0 24s.9 7.5 2.6 10.8l8-6.2z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.3-5.7c-2.2 1.5-5 2.3-8.6 2.3-6.2 0-11.5-4.1-13.4-9.8l-8 6.2C6.5 42.6 14.6 48 24 48z"/></svg>
       Продължете с Google
@@ -37,7 +49,7 @@
       <svg viewBox="0 0 21 21" aria-hidden="true"><path fill="#F25022" d="M1 1h9v9H1z"/><path fill="#7FBA00" d="M11 1h9v9h-9z"/><path fill="#00A4EF" d="M1 11h9v9H1z"/><path fill="#FFB900" d="M11 11h9v9h-9z"/></svg>
       Продължете с Microsoft
     </a>
-    <p class="login__note">Продължавайки, потвърждавате, че сте прочели <a href="/privacy.html">политиката за лични данни</a>. Операторите на БУЛАДМИН влизат със служебния си Microsoft акаунт.</p>
+    <p class="login__note">При първия вход ще попълните данните си и ще потвърдите <a href="/privacy.html">политиката за лични данни</a>. Служител на БУЛАДМИН сте? <a href="/operator.html">Вход за оператори</a>.</p>
   </section>
 </div></main>
 <footer class="site-footer"><div class="wrap"><span>© 2026 БУЛАДМИН</span><span><a href="mailto:call@buladmin.eu">call@buladmin.eu</a> · <a href="/privacy.html">Лични данни</a> · <a href="https://www.buladmin.eu/">buladmin.eu</a></span></div></footer>

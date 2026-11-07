@@ -1,5 +1,6 @@
 import {
-  api, contactFields, fatal, formatDate, formatTime, formValues, h, mount, showError, showFieldErrors, statusPill, tracker,
+  api, contactFields, fatal, formatDate, formatTime, formValues, h, loginLabel, mount, securityCards, showError, showFieldErrors,
+  statusPill, tracker,
 } from './core.js';
 
 let main;
@@ -152,9 +153,10 @@ function viewProfile() {
         isCompany && [h('dt', {}, 'ЕИК/БУЛСТАТ'), h('dd', {}, c.eik)],
         isCompany && c.vatNumber && [h('dt', {}, 'ДДС номер'), h('dd', {}, c.vatNumber)],
         isCompany && [h('dt', {}, 'Представляващ'), h('dd', {}, c.representative)],
-        h('dt', {}, 'Вход чрез'), h('dd', {}, `${c.provider === 'google' ? 'Google' : 'Microsoft'} (${c.loginEmail})`))),
+        h('dt', {}, 'Вход чрез'), h('dd', {}, loginLabel(c)))),
     h('p', { class: 'small muted' }, 'За промяна на горните данни пишете на call@buladmin.eu.'),
     h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Данни за контакт'), form),
+    state.me.security && securityCards(state.me.security),
   );
 }
 

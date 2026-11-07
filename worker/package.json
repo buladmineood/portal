@@ -6,6 +6,7 @@
     "test": "node --test test/",
     "dev": "node dev/server.mjs",
     "provision": "node scripts/provision.mjs",
+    "secrets": "node scripts/push-secrets.mjs",
     "deploy": "npx wrangler@4 deploy"
   }
 }

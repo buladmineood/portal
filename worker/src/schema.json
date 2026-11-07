@@ -6,7 +6,7 @@
       { "name": "createdAt", "label": "Създаден", "kind": "date" },
       { "name": "updatedAt", "label": "Обновен", "kind": "date" },
       { "name": "identity", "label": "Идентичност при вход", "kind": "text", "indexed": true },
-      { "name": "provider", "label": "Вход чрез", "kind": "choice", "choices": ["google", "microsoft"] },
+      { "name": "provider", "label": "Вход чрез", "kind": "choice", "choices": ["local", "google", "microsoft"] },
       { "name": "loginEmail", "label": "Имейл за вход", "kind": "text" },
       { "name": "personType", "label": "Вид лице", "kind": "choice", "choices": ["Физическо лице", "Юридическо лице"], "indexed": true },
       { "name": "firstName", "label": "Име", "kind": "text" },
@@ -57,10 +57,35 @@
   },
   "operators": {
     "title": "Портал - Оператори",
-    "titleLabel": "Служебен имейл",
+    "titleLabel": "Имейл за вход",
     "columns": [
       { "name": "fullName", "label": "Име", "kind": "text" },
-      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] }
+      { "name": "isActive", "label": "Активен", "kind": "choice", "choices": ["Да", "Не"] },
+      { "name": "role", "label": "Роля", "kind": "choice", "choices": ["Администратор", "Оператор"] },
+      { "name": "passwordHash", "label": "Хеш на паролата", "kind": "text" },
+      { "name": "sessionVersion", "label": "Версия на сесията", "kind": "text" },
+      { "name": "failedLogins", "label": "Грешни опити", "kind": "text" },
+      { "name": "lockedUntil", "label": "Заключен до", "kind": "text" },
+      { "name": "resetTokenHash", "label": "Хеш на еднократен линк", "kind": "text", "indexed": true },
+      { "name": "resetExpires", "label": "Линкът изтича", "kind": "text" },
+      { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
+      { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true }
+    ]
+  },
+  "accounts": {
+    "title": "Портал - Акаунти",
+    "titleLabel": "ID акаунт",
+    "columns": [
+      { "name": "createdAt", "label": "Създаден", "kind": "date" },
+      { "name": "email", "label": "Имейл за вход", "kind": "text", "indexed": true },
+      { "name": "passwordHash", "label": "Хеш на паролата", "kind": "text" },
+      { "name": "sessionVersion", "label": "Версия на сесията", "kind": "text" },
+      { "name": "failedLogins", "label": "Грешни опити", "kind": "text" },
+      { "name": "lockedUntil", "label": "Заключен до", "kind": "text" },
+      { "name": "resetTokenHash", "label": "Хеш на еднократен линк", "kind": "text", "indexed": true },
+      { "name": "resetExpires", "label": "Линкът изтича", "kind": "text" },
+      { "name": "googleId", "label": "Свързан Google", "kind": "text", "indexed": true },
+      { "name": "microsoftId", "label": "Свързан Microsoft", "kind": "text", "indexed": true }
     ]
   }
 }

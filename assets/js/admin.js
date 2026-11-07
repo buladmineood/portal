@@ -1,5 +1,5 @@
 import {
-  api, fatal, formatDate, formatTime, formValues, h, mount, showError, showFieldErrors, statusPill,
+  api, fatal, formatDate, formatTime, formValues, h, linkBox, loginLabel, mount, securityCards, showError, showFieldErrors, statusPill,
 } from './core.js';
 
 let main;
@@ -14,7 +14,9 @@ function page(...children) {
 
 const tabs = (current) => h('nav', { class: 'tabs', 'aria-label': 'Раздели' },
   h('a', { href: '#/', 'aria-current': current === 'requests' ? 'page' : null }, 'Заявки'),
-  h('a', { href: '#/clients', 'aria-current': current === 'clients' ? 'page' : null }, 'Клиенти'));
+  h('a', { href: '#/clients', 'aria-current': current === 'clients' ? 'page' : null }, 'Клиенти'),
+  data?.team && h('a', { href: '#/operators', 'aria-current': current === 'operators' ? 'page' : null }, 'Оператори'),
+  h('a', { href: '#/me', 'aria-current': current === 'me' ? 'page' : null }, 'Моят акаунт'));
 
 const operatorName = (email) => data.operators.find((o) => o.email === email)?.name || email;
 const norm = (s) => String(s || '').toLocaleLowerCase('bg');
@@ -83,6 +85,7 @@ function viewRequests() {
 
 function viewClients() {
   const results = h('div', {});
+  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
   let query = '';
   const render = () => {
     const q = norm(query);
@@ -91,22 +94,118 @@ function viewClients() {
     for (const r of data.requests) counts[r.clientId] = (counts[r.clientId] || 0) + 1;
     results.replaceChildren(rows.length
       ? h('div', { class: 'table-wrap' }, h('table', {},
-          h('thead', {}, h('tr', {}, ['Клиент', 'Вид', 'ЕИК', 'Контакт', 'Заявки', 'Регистриран'].map((t) => h('th', { scope: 'col' }, t)))),
+          h('thead', {}, h('tr', {}, ['Клиент', 'Вид', 'ЕИК', 'Контакт', 'Заявки', 'Регистриран', 'Вход'].map((t) => h('th', { scope: 'col' }, t)))),
           h('tbody', {}, rows.map((c) => h('tr', {},
             h('td', {}, h('strong', {}, c.companyName || [c.firstName, c.middleName, c.lastName].filter(Boolean).join(' ')), h('div', { class: 'small muted' }, c.city)),
             h('td', { 'data-label': 'Вид' }, c.personType),
             h('td', { 'data-label': 'ЕИК' }, c.eik || '–'),
             h('td', { 'data-label': 'Контакт' }, c.phone, h('div', { class: 'small' }, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail))),
             h('td', { 'data-label': 'Заявки' }, String(counts[c.id] || 0)),
-            h('td', { 'data-label': 'Регистриран' }, formatDate(c.createdAt)))))))
+            h('td', { 'data-label': 'Регистриран' }, formatDate(c.createdAt)),
+            h('td', { 'data-label': 'Вход' }, loginLabel(c),
+              c.provider === 'local' && h('div', {}, h('button', {
+                class: 'link-btn small', type: 'button',
+                onclick: async () => {
+                  try {
+                    const { link } = await api(`/admin/clients/${encodeURIComponent(c.id)}/reset`, { method: 'POST' });
+                    notice.replaceChildren(linkBox(link, `Линк за нова парола за ${c.loginEmail}. Първо проверете самоличността на клиента.`));
+                  } catch (err) {
+                    showError(notice, err.message);
+                  }
+                  window.scrollTo(0, 0);
+                },
+              }, 'Линк за нова парола'))))))))
       : h('div', { class: 'empty' }, data.clients.length ? 'Няма клиенти по това търсене.' : 'Още няма регистрирани клиенти.'));
   };
   const search = h('input', {
     type: 'search', placeholder: 'Търсене по име, ЕИК, телефон, имейл…', 'aria-label': 'Търсене',
     oninput: () => { query = search.value; render(); },
   });
-  page(tabs('clients'), h('div', { class: 'filters', style: 'grid-template-columns:minmax(0,1fr)' }, search), results);
+  page(tabs('clients'), notice, h('div', { class: 'filters', style: 'grid-template-columns:minmax(0,1fr)' }, search), results);
   render();
+}
+
+function viewMe() {
+  page(tabs('me'), h('div', { class: 'wrap--narrow stack', style: 'padding:0;margin-inline:0' },
+    h('p', { class: 'muted' }, `${me.operator.name} · ${me.operator.email} · ${me.operator.role}`),
+    securityCards(me.security)));
+}
+
+function viewOperators() {
+  const notice = h('div', { 'aria-live': 'polite', style: 'margin-bottom:16px' });
+  const refresh = async () => {
+    data = await api('/admin/overview');
+    renderTable();
+  };
+  const tableBox = h('div', {});
+
+  function renderTable() {
+    tableBox.replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Оператор', 'Роля', 'Състояние', 'Свързан с', 'Действия'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, data.team.map((o) => {
+        const isMe = o.email === me.operator.email;
+        const act = (label, fn) => h('button', {
+          class: 'link-btn small', type: 'button',
+          onclick: async () => {
+            notice.replaceChildren();
+            try {
+              await fn();
+            } catch (err) {
+              showError(notice, err.message);
+            }
+          },
+        }, label);
+        const url = `/admin/operators/${encodeURIComponent(o.email)}`;
+        const linked = [o.google && 'Google', o.microsoft && 'Microsoft'].filter(Boolean).join(', ');
+        return h('tr', {},
+          h('td', {}, h('strong', {}, o.name), h('div', { class: 'small muted' }, o.email)),
+          h('td', { 'data-label': 'Роля' }, o.role),
+          h('td', { 'data-label': 'Състояние' }, o.isActive !== 'Да' ? 'Деактивиран' : o.pendingSetup ? 'Очаква парола' : 'Активен'),
+          h('td', { 'data-label': 'Свързан с' }, linked || '–'),
+          h('td', {}, isMe ? h('span', { class: 'muted small' }, 'Това сте Вие') : h('div', { class: 'row' },
+            act('Линк за парола', async () => {
+              const { link } = await api(`${url}/reset`, { method: 'POST' });
+              notice.replaceChildren(linkBox(link, `Линк за задаване на парола за ${o.email}.`));
+              window.scrollTo(0, 0);
+            }),
+            act(o.isActive === 'Да' ? 'Деактивирайте' : 'Активирайте', async () => {
+              await api(url, { method: 'PATCH', body: { isActive: o.isActive === 'Да' ? 'Не' : 'Да' } });
+              await refresh();
+            }))));
+      })))));
+  }
+
+  const submit = h('button', { class: 'btn', type: 'submit' }, 'Създайте покана');
+  const form = h('form', { class: 'form', novalidate: true },
+    h('div', { class: 'form__grid' },
+      h('div', { class: 'field' }, h('label', { for: 'f-fullName' }, 'Име'), h('input', { id: 'f-fullName', name: 'fullName', type: 'text', maxlength: 160 })),
+      h('div', { class: 'field' }, h('label', { for: 'f-email' }, 'Имейл за вход'), h('input', { id: 'f-email', name: 'email', type: 'email', maxlength: 200 })),
+      h('div', { class: 'field' }, h('label', { for: 'f-role' }, 'Роля'), h('select', { id: 'f-role', name: 'role' },
+        h('option', { value: 'Оператор' }, 'Оператор'), h('option', { value: 'Администратор' }, 'Администратор')))),
+    h('div', {}, submit));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    notice.replaceChildren();
+    submit.disabled = true;
+    try {
+      const values = formValues(form);
+      const { link } = await api('/admin/operators', { method: 'POST', body: values });
+      showFieldErrors(form, {});
+      form.reset();
+      await refresh();
+      notice.replaceChildren(linkBox(link, `Покана за ${values.email}. С този линк операторът си задава парола.`));
+      window.scrollTo(0, 0);
+    } catch (err) {
+      showFieldErrors(form, err.fields);
+      showError(notice, err.message);
+    }
+    submit.disabled = false;
+  });
+
+  page(tabs('operators'), notice, h('div', { class: 'stack' },
+    tableBox,
+    h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Нов оператор'), form)));
+  renderTable();
 }
 
 function clientCard(c) {
@@ -121,7 +220,7 @@ function clientCard(c) {
     h('dt', {}, 'Телефон'), h('dd', {}, h('a', { href: `tel:${c.phone.replace(/[^+\d]/g, '')}` }, c.phone)),
     h('dt', {}, 'Имейл'), h('dd', {}, h('a', { href: `mailto:${c.contactEmail}` }, c.contactEmail)),
     h('dt', {}, 'Адрес'), h('dd', {}, `${c.city}, ${c.address}`),
-    h('dt', {}, 'Вход чрез'), h('dd', {}, `${c.provider === 'google' ? 'Google' : 'Microsoft'} (${c.loginEmail})`));
+    h('dt', {}, 'Вход чрез'), h('dd', {}, loginLabel(c)));
 }
 
 function eventLine(e) {
@@ -226,23 +325,25 @@ async function route() {
       page(h('div', { class: 'loading' }, 'Зареждане…'));
       data = await api('/admin/overview');
       if (hash === '/clients') viewClients();
+      else if (hash === '/me') viewMe();
+      else if (hash === '/operators' && data.team) viewOperators();
       else viewRequests();
     }
   } catch (err) {
-    if (err.status === 401) return location.replace('/');
+    if (err.status === 401) return location.replace('/operator.html');
     fatal(main, err);
   }
 }
 
 async function init() {
   me = await api('/me');
-  if (!me.authenticated) return location.replace('/');
+  if (!me.authenticated) return location.replace('/operator.html');
   if (!me.operator) {
     const denied = mount({ tag: 'Оператори', user: me.identity.email });
     denied.append(h('div', { class: 'wrap wrap--narrow section stack' },
       h('h1', {}, 'Нямате достъп'),
-      h('p', {}, 'Тази част е само за оператори на БУЛАДМИН. Влезте със служебния си Microsoft акаунт или помолете администратор да Ви добави в таблицата „Портал - Оператори“.'),
-      h('p', {}, h('a', { href: '/account.html' }, 'Към клиентския портал'))));
+      h('p', {}, 'Тази част е само за оператори на БУЛАДМИН. Помолете администратор да Ви изпрати покана.'),
+      h('p', {}, h('a', { href: '/operator.html' }, 'Вход за оператори'), ' · ', h('a', { href: '/account.html' }, 'Клиентски портал'))));
     return;
   }
   [meta, data] = await Promise.all([api('/meta'), api('/admin/overview')]);

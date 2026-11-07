@@ -117,6 +117,23 @@ a { color: var(--navy); }
 .login__note { font-size: .86rem; color: var(--ink-2); }
 @media (max-width: 800px) { .login { grid-template-columns: 1fr; } }
 
+.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: var(--radius); background: var(--tint); }
+.segmented button { min-height: 40px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); font: inherit; font-weight: 600; cursor: pointer; }
+.segmented button[aria-pressed="true"] { background: var(--paper); color: var(--navy); box-shadow: 0 1px 2px rgb(16 41 76 / .18); }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--ink-2); font-size: .86rem; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.login__card .form { gap: 14px; }
+.login__card .btn[type="submit"] { width: 100%; }
+.linked-list { display: grid; gap: 12px; }
+.link-box { display: grid; gap: 8px; color: var(--ink); }
+.link-box__row { display: flex; flex-wrap: wrap; gap: 8px; }
+.link-box input { flex: 1 1 220px; min-width: 0; min-height: 38px; padding: 6px 10px; border: 1px solid #a9a597; border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; font-size: .88rem; }
+.field input[type="password"] {
+  width: 100%; min-height: 44px; padding: 9px 12px;
+  border: 1px solid #a9a597; border-radius: 8px; background: var(--paper); color: var(--ink);
+  font: inherit;
+}
+
 /* Формуляри */
 .form { display: grid; gap: 18px; }
 .form__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }

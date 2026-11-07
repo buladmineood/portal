@@ -6,14 +6,14 @@ import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp, SESSION_COOKIE } from '../src/app.js';
-import { signToken } from '../src/crypto.js';
+import { b64url, sha256, signToken } from '../src/crypto.js';
 import { MemoryStore } from '../src/store.js';
 
 const PORT = 8788;
 const ORIGIN = `http://localhost:${PORT}`;
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const TENANT = 'dev-tenant';
-const env = { PORTAL_ORIGIN: ORIGIN, SESSION_SECRET: 'dev-only', OPERATOR_TENANT_ID: TENANT };
+const env = { PORTAL_ORIGIN: ORIGIN, SESSION_SECRET: 'dev-only', PASSWORD_PEPPER: 'dev-only' };
+const DEV_SETUP_TOKEN = 'o.dev-setup';
 
 const at = (daysAgo) => new Date(Date.now() - daysAgo * 864e5).toISOString().replace(/\.\d+Z$/, 'Z');
 const seedClient = {
@@ -33,8 +33,13 @@ const req = (id, client, serviceCategory, service, details, requestStatus, assig
 });
 const store = new MemoryStore({
   operators: [
-    { id: 'operator@buladmin.eu', fullName: 'Демо Оператор', isActive: 'Да' },
-    { id: 'kolega@buladmin.eu', fullName: 'Демо Колега', isActive: 'Да' },
+    { id: 'operator@buladmin.eu', fullName: 'Демо Оператор', isActive: 'Да', role: 'Администратор', sessionVersion: '0' },
+    { id: 'kolega@buladmin.eu', fullName: 'Демо Колега', isActive: 'Да', role: 'Оператор', sessionVersion: '0' },
+    // Вход с парола: отворете /set-password.html#t=o.dev-setup
+    {
+      id: 'nov@buladmin.eu', fullName: 'Нов Оператор', isActive: 'Да', role: 'Оператор', sessionVersion: '0',
+      resetTokenHash: b64url(await sha256(DEV_SETUP_TOKEN)), resetExpires: new Date(Date.now() + 864e5).toISOString(),
+    },
   ],
   clients: [seedClient, seedCompany],
   requests: [
@@ -56,7 +61,7 @@ const app = createApp({ env, store });
 const devUsers = {
   client: { sub: 'google:client', provider: 'google', email: 'maria@example.com', name: 'Мария Петрова' },
   fresh: { sub: `google:new-${Date.now()}`, provider: 'google', email: 'nov@example.com', name: 'Нов Потребител', firstName: 'Нов', lastName: 'Потребител' },
-  operator: { sub: `microsoft:${TENANT}:op`, provider: 'microsoft', tid: TENANT, upn: 'operator@buladmin.eu', email: 'operator@buladmin.eu', name: 'Демо Оператор' },
+  operator: { sub: 'operator:operator@buladmin.eu', provider: 'operator', principalId: 'operator@buladmin.eu', ver: '0', email: 'operator@buladmin.eu', name: 'Демо Оператор' },
 };
 const destinations = { client: '/account.html', fresh: '/register.html', operator: '/admin.html' };
 const MIME = {

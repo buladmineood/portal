@@ -1,3 +1,4 @@
+import { CLIENT_ASSERTION_TYPE, clientAssertion } from './crypto.js';
 import schema from './schema.json' with { type: 'json' };
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
@@ -19,14 +20,15 @@ export class GraphStore {
 
   async accessToken() {
     if (this.token && Date.now() < this.tokenExpiry) return this.token;
-    const { GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET } = this.env;
-    const res = await this.fetch(`https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`, {
+    const tokenUrl = `https://login.microsoftonline.com/${this.env.GRAPH_TENANT_ID}/oauth2/v2.0/token`;
+    const res = await this.fetch(tokenUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'client_credentials',
-        client_id: GRAPH_CLIENT_ID,
-        client_secret: GRAPH_CLIENT_SECRET,
+        client_id: this.env.MS_CLIENT_ID,
+        client_assertion_type: CLIENT_ASSERTION_TYPE,
+        client_assertion: await clientAssertion(this.env, tokenUrl),
         scope: 'https://graph.microsoft.com/.default',
       }),
     });
@@ -119,7 +121,7 @@ export class GraphStore {
 // За тестове и локална разработка; не се използва в production.
 export class MemoryStore {
   constructor(seed = {}) {
-    this.tables = { clients: [], requests: [], events: [], operators: [], ...seed };
+    this.tables = { clients: [], requests: [], events: [], operators: [], accounts: [], ...seed };
   }
   async list(table) { return this.tables[table].map((r) => ({ ...r })); }
   async find(table, field, value) { return (await this.list(table)).filter((r) => r[field] === value); }

@@ -120,6 +120,97 @@ export function contactFields(values = {}) {
   ];
 }
 
+export const loginLabel = (c) => {
+  const names = { local: 'Имейл и парола', google: 'Google', microsoft: 'Microsoft' };
+  return `${names[c.provider] || c.provider} (${c.loginEmail})`;
+};
+
+// Еднократен линк, който операторът копира и изпраща сам, защото порталът още не праща имейли.
+export function linkBox(link, note) {
+  const input = h('input', { type: 'text', value: link, readonly: true, 'aria-label': 'Еднократен линк' });
+  const copy = h('button', {
+    class: 'btn btn--small', type: 'button',
+    onclick: async () => {
+      input.select();
+      try {
+        await navigator.clipboard.writeText(link);
+        copy.textContent = 'Копирано';
+      } catch { /* текстът остава маркиран за ръчно копиране */ }
+    },
+  }, 'Копирайте');
+  return h('div', { class: 'alert alert--ok link-box', role: 'status' },
+    h('p', {}, note),
+    h('div', { class: 'link-box__row' }, input, copy),
+    h('p', { class: 'small' }, 'Линкът е валиден 72 часа и се показва само сега. Изпратете го лично на човека.'));
+}
+
+const PROVIDER_NAMES = { google: 'Google', microsoft: 'Microsoft' };
+
+// Свързани акаунти и смяна на парола; общо за клиенти и оператори с локален профил.
+export function securityCards(security) {
+  const status = new URLSearchParams(location.search).get('linked');
+  const notice = status && h('div', { class: `alert ${status === 'ok' ? 'alert--ok' : 'alert--error'}`, role: 'status' },
+    status === 'ok' ? 'Акаунтът е свързан. Вече можете да влизате и с него.' : 'Този акаунт вече се използва от друг профил в портала.');
+
+  const linkAlert = h('div', { 'aria-live': 'polite' });
+  const providerRow = (provider) => {
+    const linked = security[provider];
+    return h('li', { class: 'row row--between' },
+      h('span', {}, h('strong', {}, PROVIDER_NAMES[provider]), ' ', h('span', { class: 'muted small' }, linked ? 'свързан' : 'не е свързан')),
+      h('button', {
+        class: 'btn btn--ghost btn--small', type: 'button',
+        onclick: async () => {
+          try {
+            if (linked) {
+              await api(`/account/unlink/${provider}`, { method: 'POST' });
+              location.reload();
+            } else {
+              const { url } = await api(`/account/link/${provider}`, { method: 'POST' });
+              location.href = url;
+            }
+          } catch (err) {
+            showError(linkAlert, err.message);
+          }
+        },
+      }, linked ? 'Премахнете' : 'Свържете'));
+  };
+
+  const pwAlert = h('div', { 'aria-live': 'polite' });
+  const save = h('button', { class: 'btn', type: 'submit' }, 'Сменете паролата');
+  const form = h('form', { class: 'form', novalidate: true },
+    h('div', { class: 'field' }, h('label', { for: 'f-current' }, 'Текуща парола'),
+      h('input', { id: 'f-current', name: 'current', type: 'password', autocomplete: 'current-password', maxlength: 128 })),
+    h('div', { class: 'field' }, h('label', { for: 'f-new' }, 'Нова парола', h('span', { class: 'field__hint' }, ' (поне 10 знака)')),
+      h('input', { id: 'f-new', name: 'password', type: 'password', autocomplete: 'new-password', maxlength: 128 })),
+    pwAlert,
+    h('div', {}, save));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    pwAlert.replaceChildren();
+    save.disabled = true;
+    try {
+      await api('/account/password', { method: 'POST', body: formValues(form) });
+      showFieldErrors(form, {});
+      form.reset();
+      pwAlert.replaceChildren(h('div', { class: 'alert alert--ok', role: 'status' }, 'Паролата е сменена.'));
+    } catch (err) {
+      showFieldErrors(form, err.fields);
+      showError(pwAlert, err.message);
+    }
+    save.disabled = false;
+  });
+
+  return [
+    h('div', { class: 'card stack' },
+      h('h2', {}, 'Свързани акаунти'),
+      h('p', { class: 'small muted' }, 'Свържете Google или Microsoft, за да влизате и с тях, без да въвеждате паролата си.'),
+      notice,
+      h('ul', { class: 'linked-list' }, providerRow('google'), providerRow('microsoft')),
+      linkAlert),
+    h('div', { class: 'card' }, h('h2', { style: 'margin-bottom:16px' }, 'Смяна на парола'), form),
+  ];
+}
+
 export const formValues = (form) => Object.fromEntries(new FormData(form).entries());
 
 export function footer() {

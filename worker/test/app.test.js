@@ -1,27 +1,42 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createApp, SESSION_COOKIE } from '../src/app.js';
-import { b64url, signToken } from '../src/crypto.js';
+import { b64url, b64urlDecode, clientAssertion, signToken } from '../src/crypto.js';
 import { GraphStore, MemoryStore } from '../src/store.js';
 import { isValidEik, validateRegistration } from '../src/validate.js';
 
 const ORIGIN = 'https://portal.test';
 const TENANT = 'tenant-1';
+const testKeys = await crypto.subtle.generateKey(
+  { name: 'RSA-PSS', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+  true,
+  ['sign', 'verify'],
+);
+const testPkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', testKeys.privateKey));
+const certEnv = {
+  MS_CLIENT_ID: 'm-id',
+  MS_CERT_THUMBPRINT: 'thumb',
+  MS_CERT_PRIVATE_KEY: btoa(String.fromCharCode(...testPkcs8)),
+};
 const env = {
   PORTAL_ORIGIN: ORIGIN,
   SESSION_SECRET: 'test-secret',
   OPERATOR_TENANT_ID: TENANT,
   GOOGLE_CLIENT_ID: 'g-id',
   GOOGLE_CLIENT_SECRET: 'g-secret',
-  MS_CLIENT_ID: 'm-id',
-  MS_CLIENT_SECRET: 'm-secret',
+  PASSWORD_PEPPER: 'test-pepper',
+  ...certEnv,
 };
 
 function setup(fetchImpl) {
   const store = new MemoryStore({
     operators: [
-      { id: 'op@bulmail.eu', fullName: 'Оператор Едно', isActive: 'Да' },
-      { id: 'old@bulmail.eu', fullName: 'Бивш', isActive: 'Не' },
+      {
+        id: 'op@bulmail.eu', fullName: 'Оператор Едно', isActive: 'Да', role: 'Администратор', sessionVersion: '0',
+        microsoftId: `microsoft:${TENANT}:m1`, passwordHash: 'ТАЙНО-ХЕШ',
+      },
+      { id: 'plain@bulmail.eu', fullName: 'Обикновен', isActive: 'Да', role: 'Оператор', sessionVersion: '0' },
+      { id: 'old@bulmail.eu', fullName: 'Бивш', isActive: 'Не', role: 'Оператор', sessionVersion: '0' },
     ],
   });
   return { store, app: createApp({ env, store, fetchImpl }) };
@@ -30,9 +45,11 @@ function setup(fetchImpl) {
 const users = {
   alice: { sub: 'google:alice', provider: 'google', email: 'alice@example.com', name: 'Алис' },
   bob: { sub: 'google:bob', provider: 'google', email: 'bob@example.com', name: 'Боб' },
-  op: { sub: `microsoft:${TENANT}:op`, provider: 'microsoft', tid: TENANT, upn: 'OP@bulmail.eu', email: 'op@bulmail.eu', name: 'Оп' },
-  inactive: { sub: `microsoft:${TENANT}:old`, provider: 'microsoft', tid: TENANT, upn: 'old@bulmail.eu' },
-  outsider: { sub: 'microsoft:other:op', provider: 'microsoft', tid: 'other', upn: 'op@bulmail.eu' },
+  op: { sub: 'operator:op@bulmail.eu', provider: 'operator', principalId: 'op@bulmail.eu', ver: '0', email: 'op@bulmail.eu' },
+  plain: { sub: 'operator:plain@bulmail.eu', provider: 'operator', principalId: 'plain@bulmail.eu', ver: '0', email: 'plain@bulmail.eu' },
+  inactive: { sub: 'operator:old@bulmail.eu', provider: 'operator', principalId: 'old@bulmail.eu', ver: '0' },
+  staleOp: { sub: 'operator:op@bulmail.eu', provider: 'operator', principalId: 'op@bulmail.eu', ver: '7' },
+  outsider: { sub: `microsoft:${TENANT}:x`, provider: 'microsoft', tid: TENANT, upn: 'op@bulmail.eu', email: 'op@bulmail.eu' },
   googleOp: { sub: 'google:op', provider: 'google', email: 'op@bulmail.eu', upn: 'op@bulmail.eu', tid: TENANT },
 };
 
@@ -150,11 +167,16 @@ test('клиент не вижда и не пише в чужда заявка',
   assert.deepEqual((await call(app, 'GET', '/api/requests', { as: 'bob' })).data.requests, []);
 });
 
-test('достъп до администрация: само активен оператор от служебния tenant', async () => {
+test('достъп до администрация: само активен операторски акаунт', async () => {
   const { app } = setup();
-  assert.equal((await call(app, 'GET', '/api/admin/overview', { as: 'op' })).status, 200);
-  for (const as of ['alice', 'inactive', 'outsider', 'googleOp']) {
+  const overview = await call(app, 'GET', '/api/admin/overview', { as: 'op' });
+  assert.equal(overview.status, 200);
+  assert.ok(!JSON.stringify(overview.data).includes('ТАЙНО-ХЕШ'));
+  for (const as of ['alice', 'outsider', 'googleOp']) {
     assert.equal((await call(app, 'GET', '/api/admin/overview', { as })).status, 403, as);
+  }
+  for (const as of ['inactive', 'staleOp']) {
+    assert.equal((await call(app, 'GET', '/api/admin/overview', { as })).status, 401, as);
   }
   assert.equal((await call(app, 'GET', '/api/me', { as: 'outsider' })).data.operator, null);
 });
@@ -250,9 +272,14 @@ test('Google: нов потребител отива на регистрация
   assert.ok(/HttpOnly/.test(cookies) && /Secure/.test(cookies) && /SameSite=Lax/.test(cookies));
 });
 
-test('Microsoft: оператор отива в администрацията', async () => {
+test('Microsoft: свързан оператор отива в администрацията', async () => {
   const { res } = await finishFlow('microsoft', msClaims);
   assert.equal(res.headers.get('location'), '/admin.html');
+});
+
+test('Microsoft: несвързан служебен акаунт със същия имейл НЕ става оператор', async () => {
+  const { res } = await finishFlow('microsoft', (n) => ({ ...msClaims(n), sub: 'друг' }));
+  assert.equal(res.headers.get('location'), '/register.html');
 });
 
 test('вход: грешни state, nonce, aud и iss се отказват', async () => {
@@ -270,6 +297,228 @@ test('вход: грешни state, nonce, aud и iss се отказват', as
   }
 });
 
+test('сертификат: твърдението е PS256, с верен подпис и полета по документацията на Microsoft', async () => {
+  const aud = 'https://login.microsoftonline.com/t/oauth2/v2.0/token';
+  const nowMs = 1_800_000_000_000;
+  const [head, body, sig] = (await clientAssertion(certEnv, aud, nowMs)).split('.');
+  const decode = (part) => JSON.parse(new TextDecoder().decode(b64urlDecode(part)));
+  assert.deepEqual(decode(head), { alg: 'PS256', typ: 'JWT', 'x5t#S256': 'thumb' });
+  const claims = decode(body);
+  assert.equal(claims.aud, aud);
+  assert.equal(claims.iss, 'm-id');
+  assert.equal(claims.sub, 'm-id');
+  assert.ok(claims.jti);
+  assert.equal(claims.nbf, 1_800_000_000);
+  assert.equal(claims.exp, 1_800_000_300);
+  const valid = await crypto.subtle.verify(
+    { name: 'RSA-PSS', saltLength: 32 }, testKeys.publicKey, b64urlDecode(sig), new TextEncoder().encode(`${head}.${body}`),
+  );
+  assert.equal(valid, true);
+});
+
+test('Microsoft: при вход се праща сертификат, а не тайна', async () => {
+  let sent;
+  let nonce;
+  const { app } = setup(async (url, init) => {
+    sent = init.body;
+    return new Response(JSON.stringify({ id_token: jwt(msClaims(nonce)) }));
+  });
+  const flow = await startFlow(app, 'microsoft');
+  nonce = flow.nonce;
+  await app(new Request(`${ORIGIN}/api/auth/microsoft/callback?code=abc&state=${flow.state}`, { headers: { cookie: flow.cookie } }));
+  assert.ok(sent.get('client_assertion'));
+  assert.equal(sent.get('client_secret'), null);
+});
+
+// --- Локални акаунти ---
+
+const cookieOf = (res) => res.headers.getSetCookie().find((c) => c.startsWith(SESSION_COOKIE)).split(';')[0];
+const GOOD_PASSWORD = 'дълга-парола-123';
+
+test('локален клиент: регистрация, вход, данни и заявка без Google', async () => {
+  const { app, store } = setup();
+  const created = await call(app, 'POST', '/api/auth/signup', { body: { email: 'New@Example.com', password: GOOD_PASSWORD } });
+  assert.equal(created.status, 201);
+  const row = store.tables.accounts[0];
+  assert.equal(row.email, 'new@example.com');
+  assert.ok(row.passwordHash.startsWith('pbkdf2-sha256$100000$'));
+  assert.ok(!row.passwordHash.includes(GOOD_PASSWORD));
+
+  const login = await call(app, 'POST', '/api/auth/login', { body: { email: 'new@example.com', password: GOOD_PASSWORD } });
+  assert.equal(login.status, 200);
+  const cookie = cookieOf(login.res);
+  const me = await call(app, 'GET', '/api/me', { cookie });
+  assert.equal(me.data.identity.provider, 'local');
+  assert.equal(me.data.client, null);
+  assert.ok(!JSON.stringify(me.data).includes('pbkdf2'));
+  assert.equal((await call(app, 'POST', '/api/register', { cookie, body: individual })).status, 201);
+  assert.equal(store.tables.clients[0].provider, 'local');
+  assert.equal((await call(app, 'POST', '/api/requests', { cookie, body: newRequest })).status, 201);
+});
+
+test('локален клиент: слаба парола и повторен имейл се отказват', async () => {
+  const { app } = setup();
+  assert.equal((await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: 'къса' } })).status, 422);
+  assert.equal((await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } })).status, 201);
+  assert.equal((await call(app, 'POST', '/api/auth/signup', { body: { email: 'A@example.com', password: GOOD_PASSWORD } })).status, 409);
+});
+
+test('вход: 5 грешни опита заключват акаунта, дори за вярната парола', async () => {
+  const { app } = setup();
+  const body = { email: 'a@example.com', password: GOOD_PASSWORD };
+  await call(app, 'POST', '/api/auth/signup', { body });
+  for (let i = 0; i < 5; i++) {
+    assert.equal((await call(app, 'POST', '/api/auth/login', { body: { ...body, password: 'грешна-парола' } })).status, 401);
+  }
+  assert.equal((await call(app, 'POST', '/api/auth/login', { body })).status, 429);
+});
+
+test('несъществуващ и грешен акаунт дават еднакъв отговор', async () => {
+  const { app } = setup();
+  await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const wrong = await call(app, 'POST', '/api/auth/login', { body: { email: 'a@example.com', password: 'грешна-парола' } });
+  const missing = await call(app, 'POST', '/api/auth/login', { body: { email: 'no@example.com', password: 'грешна-парола' } });
+  assert.deepEqual(wrong.data, missing.data);
+  assert.equal(wrong.status, missing.status);
+});
+
+test('ескалация: клиентска регистрация с имейла на оператор не дава достъп', async () => {
+  const { app } = setup();
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'op@bulmail.eu', password: GOOD_PASSWORD } });
+  assert.equal(res.status, 201);
+  const cookie = cookieOf(res.res);
+  assert.equal((await call(app, 'GET', '/api/admin/overview', { cookie })).status, 403);
+  assert.equal((await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'op@bulmail.eu', password: GOOD_PASSWORD } })).status, 401);
+});
+
+test('оператор: покана от администратор, парола през линка, вход, еднократност', async () => {
+  const { app, store } = setup();
+  assert.equal((await call(app, 'POST', '/api/admin/operators', { as: 'plain', body: { email: 'x@y.bg', fullName: 'Х' } })).status, 403);
+  assert.equal((await call(app, 'POST', '/api/admin/operators', { as: 'alice', body: { email: 'x@y.bg', fullName: 'Х' } })).status, 403);
+
+  const invited = await call(app, 'POST', '/api/admin/operators', { as: 'op', body: { email: 'New@Bulmail.eu', fullName: 'Нов', role: 'Оператор' } });
+  assert.equal(invited.status, 201);
+  const token = invited.data.link.split('#t=')[1];
+  const row = store.tables.operators.find((o) => o.id === 'new@bulmail.eu');
+  assert.ok(row.resetTokenHash && !row.resetTokenHash.includes(token));
+  // Преди задаване на парола не може да се влезе.
+  assert.equal((await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'new@bulmail.eu', password: GOOD_PASSWORD } })).status, 401);
+
+  const set = await call(app, 'POST', '/api/auth/set-password', { body: { token, password: GOOD_PASSWORD } });
+  assert.equal(set.status, 200);
+  assert.equal(set.data.destination, '/admin.html');
+  assert.equal((await call(app, 'POST', '/api/auth/set-password', { body: { token, password: GOOD_PASSWORD } })).status, 400);
+
+  const login = await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'new@bulmail.eu', password: GOOD_PASSWORD } });
+  assert.equal(login.status, 200);
+  const cookie = cookieOf(login.res);
+  assert.equal((await call(app, 'GET', '/api/admin/overview', { cookie })).status, 200);
+
+  // Деактивирането прекратява вече отворената сесия.
+  assert.equal((await call(app, 'PATCH', '/api/admin/operators/new%40bulmail.eu', { as: 'op', body: { isActive: 'Не' } })).status, 200);
+  assert.equal((await call(app, 'GET', '/api/admin/overview', { cookie })).status, 401);
+  assert.equal((await call(app, 'POST', '/api/auth/operator-login', { body: { email: 'new@bulmail.eu', password: GOOD_PASSWORD } })).status, 401);
+});
+
+test('администратор не може да деактивира себе си', async () => {
+  const { app } = setup();
+  assert.equal((await call(app, 'PATCH', '/api/admin/operators/op%40bulmail.eu', { as: 'op', body: { isActive: 'Не' } })).status, 422);
+});
+
+test('изтекъл линк се отказва', async () => {
+  const { app, store } = setup();
+  const invited = await call(app, 'POST', '/api/admin/operators', { as: 'op', body: { email: 'n@y.bg', fullName: 'Н' } });
+  store.tables.operators.find((o) => o.id === 'n@y.bg').resetExpires = '2020-01-01T00:00:00Z';
+  const token = invited.data.link.split('#t=')[1];
+  assert.equal((await call(app, 'POST', '/api/auth/set-password', { body: { token, password: GOOD_PASSWORD } })).status, 400);
+});
+
+test('смяна на парола: изисква текущата и прекратява старите сесии', async () => {
+  const { app } = setup();
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const old = cookieOf(res.res);
+  assert.equal((await call(app, 'POST', '/api/account/password', { cookie: old, body: { current: 'грешна', password: 'нова-дълга-парола' } })).status, 422);
+  const changed = await call(app, 'POST', '/api/account/password', { cookie: old, body: { current: GOOD_PASSWORD, password: 'нова-дълга-парола' } });
+  assert.equal(changed.status, 200);
+  assert.equal((await call(app, 'GET', '/api/me', { cookie: old })).data.authenticated, false);
+  assert.equal((await call(app, 'GET', '/api/me', { cookie: cookieOf(changed.res) })).data.authenticated, true);
+});
+
+test('нулиране от оператор: работи за локален клиент, но не и за Google клиент', async () => {
+  const { app, store } = setup();
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const cookie = cookieOf(res.res);
+  await call(app, 'POST', '/api/register', { cookie, body: individual });
+  await registered(app, 'bob');
+  const [local, google] = store.tables.clients;
+  assert.equal((await call(app, 'POST', `/api/admin/clients/${local.id}/reset`, { as: 'alice' })).status, 403);
+  const link = await call(app, 'POST', `/api/admin/clients/${local.id}/reset`, { as: 'plain' });
+  assert.equal(link.status, 200);
+  assert.equal((await call(app, 'POST', `/api/admin/clients/${google.id}/reset`, { as: 'plain' })).status, 422);
+  const set = await call(app, 'POST', '/api/auth/set-password', { body: { token: link.data.link.split('#t=')[1], password: 'съвсем-нова-парола' } });
+  assert.equal(set.data.destination, '/account.html');
+  assert.equal((await call(app, 'GET', '/api/me', { cookie })).data.authenticated, false);
+});
+
+test('свързване: локален акаунт се свързва с Google', async () => {
+  let nonce;
+  const { app, store } = setup(async () => new Response(JSON.stringify({ id_token: jwt(googleClaims(nonce)) })));
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const cookie = cookieOf(res.res);
+  const started = await call(app, 'POST', '/api/account/link/google', { cookie });
+  assert.equal(started.status, 200);
+  const url = new URL(started.data.url);
+  nonce = url.searchParams.get('nonce');
+  const back = await app(new Request(`${ORIGIN}/api/auth/google/callback?code=c&state=${url.searchParams.get('state')}`, {
+    headers: { cookie: `${cookie}; ${started.res.headers.get('set-cookie').split(';')[0]}` },
+  }));
+  assert.equal(back.headers.get('location'), '/account.html?linked=ok#/profile');
+  assert.equal(store.tables.accounts[0].googleId, 'google:g1');
+  assert.equal((await call(app, 'POST', '/api/account/unlink/google', { cookie })).status, 200);
+  assert.equal(store.tables.accounts[0].googleId, '');
+});
+
+test('свързване: вече използван Google акаунт се отказва', async () => {
+  let nonce;
+  const { app, store } = setup(async () => new Response(JSON.stringify({ id_token: jwt(googleClaims(nonce)) })));
+  store.tables.clients.push({ id: 'C-x', identity: 'google:g1' });
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const cookie = cookieOf(res.res);
+  const started = await call(app, 'POST', '/api/account/link/google', { cookie });
+  const url = new URL(started.data.url);
+  nonce = url.searchParams.get('nonce');
+  const back = await app(new Request(`${ORIGIN}/api/auth/google/callback?code=c&state=${url.searchParams.get('state')}`, {
+    headers: { cookie: `${cookie}; ${started.res.headers.get('set-cookie').split(';')[0]}` },
+  }));
+  assert.equal(back.headers.get('location'), '/account.html?linked=used#/profile');
+  assert.equal(store.tables.accounts[0].googleId, undefined);
+});
+
+test('свързване: започва се само с POST от собствения сайт и с локален акаунт', async () => {
+  const { app } = setup();
+  const res = await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  const cookie = cookieOf(res.res);
+  assert.equal((await call(app, 'POST', '/api/account/link/google', { cookie, origin: 'https://evil.test' })).status, 403);
+  assert.equal((await call(app, 'POST', '/api/account/link/google', { as: 'alice' })).status, 403);
+  assert.equal((await call(app, 'GET', '/api/account/link/google', { cookie })).status, 404);
+});
+
+test('свързан локален клиент влиза с Google в собствения си акаунт', async () => {
+  const { store, app } = setup();
+  await call(app, 'POST', '/api/auth/signup', { body: { email: 'a@example.com', password: GOOD_PASSWORD } });
+  store.tables.accounts[0].googleId = 'google:g1';
+  let nonce;
+  const linked = createApp({ env, store, fetchImpl: async () => new Response(JSON.stringify({ id_token: jwt(googleClaims(nonce)) })) });
+  const flow = await startFlow(linked, 'google');
+  nonce = flow.nonce;
+  const back = await linked(new Request(`${ORIGIN}/api/auth/google/callback?code=c&state=${flow.state}`, { headers: { cookie: flow.cookie } }));
+  const cookie = back.headers.getSetCookie().find((c) => c.startsWith(SESSION_COOKIE)).split(';')[0];
+  const me = await call(linked, 'GET', '/api/me', { cookie });
+  assert.equal(me.data.identity.provider, 'local');
+  assert.equal(me.data.identity.email, 'a@example.com');
+  assert.equal(me.data.security.google, true);
+});
+
 // --- Форма на заявките към Microsoft Graph ---
 
 function fakeGraph(responder) {
@@ -282,7 +531,7 @@ function fakeGraph(responder) {
     return responder(String(url), init, calls);
   };
   const store = new GraphStore({
-    GRAPH_TENANT_ID: 't', GRAPH_CLIENT_ID: 'c', GRAPH_CLIENT_SECRET: 's',
+    ...certEnv, GRAPH_TENANT_ID: 't',
     SP_HOSTNAME: 'x.sharepoint.com', SP_SITE_PATH: '/sites/buladmin',
   }, fetchImpl);
   return { store, calls: () => calls.filter((c) => !c.url.includes('login.microsoftonline.com')) };

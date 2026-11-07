@@ -3,8 +3,9 @@
 //
 //   node scripts/provision.mjs --operator ime@bulmail.eu --name "Име Фамилия"
 //
-// Чете GRAPH_CLIENT_ID и GRAPH_CLIENT_SECRET от worker/.dev.vars.
+// Чете частния ключ на сертификата от worker/.dev.vars.
 import { readFileSync } from 'node:fs';
+import { b64url, CLIENT_ASSERTION_TYPE, clientAssertion, sha256 } from '../src/crypto.js';
 import schema from '../src/schema.json' with { type: 'json' };
 
 const vars = Object.fromEntries(
@@ -23,12 +24,19 @@ const arg = (flag) => {
   return i > 0 ? process.argv[i + 1] : undefined;
 };
 
-const tokenRes = await fetch(`https://login.microsoftonline.com/${tomlVar('GRAPH_TENANT_ID')}/oauth2/v2.0/token`, {
+const certEnv = {
+  MS_CLIENT_ID: tomlVar('MS_CLIENT_ID'),
+  MS_CERT_THUMBPRINT: tomlVar('MS_CERT_THUMBPRINT'),
+  MS_CERT_PRIVATE_KEY: vars.MS_CERT_PRIVATE_KEY,
+};
+const tokenUrl = `https://login.microsoftonline.com/${tomlVar('GRAPH_TENANT_ID')}/oauth2/v2.0/token`;
+const tokenRes = await fetch(tokenUrl, {
   method: 'POST',
   body: new URLSearchParams({
     grant_type: 'client_credentials',
-    client_id: vars.GRAPH_CLIENT_ID,
-    client_secret: vars.GRAPH_CLIENT_SECRET,
+    client_id: certEnv.MS_CLIENT_ID,
+    client_assertion_type: CLIENT_ASSERTION_TYPE,
+    client_assertion: await clientAssertion(certEnv, tokenUrl),
     scope: 'https://graph.microsoft.com/.default',
   }),
 });
@@ -87,10 +95,22 @@ if (operator) {
   if (value.some((item) => item.fields.Title?.toLowerCase() === email)) {
     console.log(`  операторът вече е вписан: ${email}`);
   } else {
+    // Първият оператор е администратор и си задава парола през еднократен линк, валиден 72 часа.
+    const token = `o.${b64url(crypto.getRandomValues(new Uint8Array(32)))}`;
     await graph(`/sites/${site.id}/lists/${listIds.operators}/items`, 'POST', {
-      fields: { Title: email, fullName: arg('--name') || email, isActive: 'Да' },
+      fields: {
+        Title: email,
+        fullName: arg('--name') || email,
+        isActive: 'Да',
+        role: 'Администратор',
+        sessionVersion: '0',
+        failedLogins: '0',
+        resetTokenHash: b64url(await sha256(token)),
+        resetExpires: new Date(Date.now() + 72 * 3600 * 1000).toISOString(),
+      },
     });
-    console.log(`  добавен оператор: ${email}`);
+    console.log(`  добавен администратор: ${email}`);
+    console.log(`  линк за задаване на парола: ${tomlVar('PORTAL_ORIGIN')}/set-password.html#t=${token}`);
   }
 }
 console.log('Готово.');

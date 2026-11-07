@@ -20,7 +20,13 @@ export function isValidEik(eik) {
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-const PHONE = /^\+?[0-9][0-9 ()\/-]{5,19}$/;
+export const isValidEmail = (email) => EMAIL.test(email);
+export function passwordError(password) {
+  if (password.length < 10) return 'Паролата трябва да е поне 10 знака.';
+  if (password.length > 128) return 'Паролата трябва да е до 128 знака.';
+  return null;
+}
+const PHONE =/^\+?[0-9][0-9 ()\/-]{5,19}$/;
 const PERSON_NAME = /^[\p{L}][\p{L}\p{M}' .-]*$/u;
 
 // Връща { fields, errors }. Приемат се само изброените полета, а полетата от другия вид лице се изчистват.

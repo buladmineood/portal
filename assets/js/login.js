@@ -1,11 +1,56 @@
-import { api } from './core.js';
+import { api, showError, showFieldErrors } from './core.js';
 
-const params = new URLSearchParams(location.search);
-if (params.get('error')) document.getElementById('login-error').hidden = false;
+const isOperatorPage = document.body.dataset.role === 'operator';
+const form = document.getElementById('login-form');
+const alert = document.getElementById('form-alert');
+const submit = document.getElementById('login-submit');
+const modeLogin = document.getElementById('mode-login');
+const modeSignup = document.getElementById('mode-signup');
+let signup = false;
+
+if (new URLSearchParams(location.search).get('error')) document.getElementById('login-error').hidden = false;
+
+function setMode(value) {
+  signup = value;
+  modeLogin.setAttribute('aria-pressed', String(!signup));
+  modeSignup.setAttribute('aria-pressed', String(signup));
+  submit.textContent = signup ? 'Създайте профил' : 'Вход';
+  form.elements.password.autocomplete = signup ? 'new-password' : 'current-password';
+  document.getElementById('password-hint').hidden = !signup;
+  document.getElementById('forgot-note').hidden = signup;
+  alert.replaceChildren();
+  showFieldErrors(form, {});
+}
+modeLogin?.addEventListener('click', () => setMode(false));
+modeSignup?.addEventListener('click', () => setMode(true));
+
+function endpoint() {
+  if (isOperatorPage) return '/auth/operator-login';
+  return signup ? '/auth/signup' : '/auth/login';
+}
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  alert.replaceChildren();
+  submit.disabled = true;
+  try {
+    await api(endpoint(), {
+      method: 'POST',
+      body: { email: form.elements.email.value, password: form.elements.password.value },
+    });
+    const me = await api('/me');
+    if (me.operator) location.replace('/admin.html');
+    else location.replace(me.client ? '/account.html' : '/register.html');
+  } catch (err) {
+    showFieldErrors(form, err.fields);
+    showError(alert, err.message);
+    submit.disabled = false;
+  }
+});
 
 // Вече влязъл потребител отива директно на своята страница.
 api('/me').then((me) => {
   if (!me.authenticated) return;
   if (me.operator) location.replace('/admin.html');
-  else location.replace(me.client ? '/account.html' : '/register.html');
-}).catch(() => { /* бутоните за вход остават видими */ });
+  else if (!isOperatorPage) location.replace(me.client ? '/account.html' : '/register.html');
+}).catch(() => { /* формата за вход остава видима */ });
