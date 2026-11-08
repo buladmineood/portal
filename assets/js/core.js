@@ -507,6 +507,7 @@ export const CATEGORY_ICONS = {
   'Електронни услуги': 'monitor',
   'Регистрации и разрешения': 'stamp',
   'Обслужване на фирми': 'briefcase',
+  'Фирмени декларации': 'stamp',
 };
 
 // --- Кратки известия и потвърждения ---
@@ -790,4 +791,38 @@ export function fatal(main, err) {
   main.replaceChildren(h('div', { class: 'wrap wrap--narrow section' },
     h('div', { class: 'alert alert--error', role: 'alert' }, err.message || 'Възникна грешка.'),
     h('p', { style: 'margin-top:12px' }, h('a', { href: '/' }, 'Към началната страница'))));
+}
+
+// --- Декларации: формите идват от /api/meta (FORMS в worker/src/catalog.js) ---
+
+export const isShown = (field, row) => {
+  if (!field.showIf) return true;
+  const value = row[field.showIf.field];
+  return field.showIf.is !== undefined ? value === field.showIf.is : !!value && value !== field.showIf.not;
+};
+
+const shownValue = (field, value) => (field.kind === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value.split('-').reverse().join('.') : value);
+
+function formRows(fields, row) {
+  return fields.filter((f) => isShown(f, row) && row[f.name]).flatMap((f) => [
+    h('dt', {}, f.label),
+    h('dd', { class: f.kind === 'egn' ? 'mono' : null }, shownValue(f, row[f.name])),
+  ]);
+}
+
+// Данните от подадена декларация само за четене. ЕГН идват скрити, освен ако операторът ги е поискал изрично.
+export function formView(definition, data) {
+  return h('div', { class: 'form-view stack' },
+    data.company?.companyName && h('p', { class: 'small muted' }, `${data.company.companyName}, ЕИК ${data.company.eik}`),
+    definition.sections.map((s) => {
+      const value = data[s.name];
+      if (!value) return null;
+      if (!s.list) return h('section', {}, h('h3', {}, s.label), h('dl', { class: 'details' }, formRows(s.fields, value)));
+      return h('section', {}, h('h3', {}, s.label),
+        value.none
+          ? h('p', { class: 'small muted' }, s.optional)
+          : value.rows.map((row, i) => h('div', { class: 'form-view__row' },
+            value.rows.length > 1 && h('p', { class: 'small muted' }, `${i + 1}.`),
+            h('dl', { class: 'details' }, formRows(s.fields, row)))));
+    }));
 }

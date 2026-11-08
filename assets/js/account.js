@@ -1,9 +1,9 @@
 import {
-  api, canRefreshNow, CATEGORY_ICONS, confirmDialog, contactFields, copyButton, emptyState, fatal, field, formatDate, formatSize, formatTime, formValues, h,
-  icon, identityFields, uploadFile,
+  api, canRefreshNow, CATEGORY_ICONS, confirmDialog, contactFields, copyButton, emptyState, fatal, field, formatDate, formatSize, formatTime, formValues, formView, h,
+  icon, identityFields, isShown, uploadFile,
   loginLabel, markClean, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill, timeAgo,
   toast, tracker,
-} from './core.js?v=4ddb93421e';
+} from './core.js?v=d37ae0875d';
 
 let main;
 let state;
@@ -111,10 +111,114 @@ async function viewHome() {
   render();
 }
 
+// --- Декларации: попълване по полетата от официалния образец ---
+
+const MAX_FORM_ROWS = 20;
+
+function blankRow(fields, client) {
+  return Object.fromEntries(fields.map((f) => [f.name, f.initial ?? (f.prefill ? client[f.prefill] || '' : '')]));
+}
+
+function blankForm(definition, client) {
+  return Object.fromEntries(definition.sections.map((s) => [
+    s.name,
+    s.list ? { none: false, rows: [blankRow(s.fields, client)] } : blankRow(s.fields, client),
+  ]));
+}
+
+// Изгражда полетата от определението и пази въведеното в data. Избор „Да/Не“ или от списък
+// пренарежда формата, защото от него зависи кои полета се показват.
+function declarationEditor(definition, client, data) {
+  const root = h('div', { class: 'stack' });
+
+  const control = (f, row, name) => {
+    const id = `f-${name}`;
+    const hint = f.hint || (!f.required ? 'по желание' : '');
+    const label = [f.label, hint && h('span', { class: 'field__hint' }, ` (${hint})`)];
+    const wrap = `field${f.wide ? ' full' : ''}`;
+    const choose = (value) => {
+      row[f.name] = value;
+      render(id);
+    };
+    if (f.kind === 'yesno') {
+      return h('fieldset', { class: wrap },
+        h('legend', {}, label),
+        h('div', { class: 'segmented yesno' }, ['Да', 'Не'].map((v) =>
+          h('label', {}, h('input', { type: 'radio', name, value: v, checked: row[f.name] === v, id: v === 'Да' ? id : null, onchange: () => choose(v) }), h('span', {}, v)))));
+    }
+    if (f.kind === 'choice') {
+      return h('div', { class: wrap },
+        h('label', { for: id }, label),
+        h('select', { id, name, onchange: (e) => choose(e.target.value) },
+          h('option', { value: '' }, '– Изберете –'),
+          f.options.map((o) => h('option', { value: o, selected: row[f.name] === o }, o))));
+    }
+    const types = { email: 'email', date: 'date' };
+    const inputmode = { egn: 'numeric', amount: 'decimal', percent: 'decimal' }[f.kind];
+    return h('div', { class: wrap },
+      h('label', { for: id }, label),
+      h('input', {
+        id, name, type: types[f.kind] || 'text', value: row[f.name] || '', inputmode,
+        maxlength: f.kind === 'egn' ? 10 : f.kind === 'currency' ? 3 : f.max || 200,
+        autocomplete: f.kind === 'egn' ? 'off' : null,
+        placeholder: f.placeholder || (f.kind === 'egn' ? '10 цифри' : null),
+        oninput: (e) => { row[f.name] = e.target.value; },
+      }));
+  };
+
+  const grid = (fields, row, prefix) => h('div', { class: 'form__grid' },
+    fields.filter((f) => isShown(f, row)).map((f) => control(f, row, `${prefix}.${f.name}`)));
+
+  const section = (s) => {
+    const key = `form.${s.name}`;
+    const head = [h('legend', {}, s.label), s.hint && h('p', { class: 'small muted' }, s.hint)];
+    if (!s.list) return h('fieldset', { class: 'form-section field', name: key }, head, grid(s.fields, data[s.name], key));
+    const value = data[s.name];
+    const none = s.optional && h('label', { class: 'check' },
+      h('input', {
+        type: 'checkbox', checked: value.none,
+        onchange: (e) => {
+          value.none = e.target.checked;
+          value.rows = value.none ? [] : [blankRow(s.fields, client)];
+          render();
+        },
+      }),
+      h('span', {}, s.optional));
+    const rows = value.rows.map((row, i) => h('div', { class: 'form-row' },
+      h('div', { class: 'form-row__head' },
+        h('span', {}, `${s.item[0].toLocaleUpperCase('bg')}${s.item.slice(1)} ${i + 1}`),
+        (value.rows.length > 1 || s.optional) && h('button', {
+          class: 'link-btn small', type: 'button',
+          onclick: () => {
+            value.rows.splice(i, 1);
+            if (!value.rows.length && s.optional) value.none = true;
+            render();
+          },
+        }, 'Премахнете')),
+      grid(s.fields, row, `${key}.${i}`)));
+    const add = !value.none && value.rows.length < MAX_FORM_ROWS && h('button', {
+      class: 'btn btn--ghost btn--small', type: 'button',
+      onclick: () => {
+        value.rows.push(blankRow(s.fields, client));
+        render();
+      },
+    }, icon('plus', 16), `Добавете ${s.item}`);
+    return h('fieldset', { class: 'form-section field', name: key }, head, none, rows, h('div', {}, add));
+  };
+
+  function render(focusId) {
+    root.replaceChildren(...definition.sections.map(section));
+    if (focusId) document.getElementById(focusId)?.focus();
+  }
+  render();
+  return root;
+}
+
 function viewNew() {
-  const { catalog } = state.meta;
+  const { forms, serviceForms } = state.meta;
   const c = state.client;
-  const draft = { category: null, service: '', details: '', identityNumber: '' };
+  const catalog = state.meta.catalog.filter((category) => !category.companyOnly || isCompany(c));
+  const draft = { category: null, service: '', details: '', identityNumber: '', form: null, peopleInformed: false };
   let step = 1;
 
   const steps = () => h('ol', { class: 'wizard-steps', 'aria-label': 'Стъпки' },
@@ -156,6 +260,7 @@ function viewNew() {
           h('button', {
             class: 'option option--row', type: 'button',
             onclick: () => {
+              if (draft.service !== service) draft.form = null;
               draft.service = service;
               step = 3;
               render();
@@ -166,6 +271,11 @@ function viewNew() {
     }
 
     const alert = h('div', { 'aria-live': 'polite' });
+    const definition = forms[serviceForms[draft.service]];
+    if (definition) {
+      renderDeclaration(head, back, alert, definition);
+      return;
+    }
     const needsIdentity = draft.category.requiresIdentity && !hasIdentity(c);
     const submit = h('button', { class: 'btn', type: 'submit' }, icon('send', 18), 'Изпратете заявката');
     const form = h('form', { class: 'form', novalidate: true },
@@ -210,6 +320,55 @@ function viewNew() {
     });
     page(head, steps(), h('div', { class: 'card' }, form));
   }
+
+  function renderDeclaration(head, back, alert, definition) {
+    draft.form ??= blankForm(definition, c);
+    const submit = h('button', { class: 'btn', type: 'submit' }, icon('send', 18), 'Изпратете заявката');
+    const form = h('form', { class: 'form', novalidate: true },
+      h('div', { class: 'summary' },
+        h('span', { class: 'option__icon' }, icon(CATEGORY_ICONS[draft.category.name] || 'doc', 22)),
+        h('div', {}, h('strong', {}, definition.title), h('p', { class: 'muted small' }, `${c.companyName}, ЕИК ${c.eik}`))),
+      definition.intro && h('div', { class: 'alert alert--warn' }, definition.intro),
+      declarationEditor(definition, c, draft.form),
+      h('div', { class: 'field' },
+        h('label', { for: 'f-details' }, 'Бележка към БУЛАДМИН', h('span', { class: 'field__hint' }, ' (по желание)')),
+        h('textarea', {
+          id: 'f-details', name: 'details', maxlength: 4000, value: draft.details,
+          oninput: (e) => { draft.details = e.target.value; },
+        })),
+      definition.thirdParties && h('div', { class: 'field' }, h('label', { class: 'check' },
+        h('input', {
+          type: 'checkbox', name: 'peopleInformed', checked: draft.peopleInformed,
+          onchange: (e) => { draft.peopleInformed = e.target.checked; },
+        }),
+        h('span', {}, 'Потвърждавам, че лицата, чиито данни посочвам, знаят, че ги предоставям на БУЛАДМИН за подаване на декларацията. ',
+          h('a', { href: '/privacy.html#declarations', target: '_blank' }, 'Политика за лични данни')))),
+      h('p', { class: 'small muted' }, 'След като подготвим декларацията, ще Ви я изпратим за проверка и подпис.'),
+      alert,
+      h('div', { class: 'row' }, back(2), submit));
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      alert.replaceChildren();
+      submit.disabled = true;
+      try {
+        const { request } = await api('/requests', {
+          method: 'POST',
+          body: {
+            serviceCategory: draft.category.name, service: draft.service, details: draft.details,
+            form: draft.form, peopleInformed: draft.peopleInformed,
+          },
+        });
+        toast('Заявката е изпратена.');
+        location.hash = `#/r/${request.id}`;
+      } catch (err) {
+        showFieldErrors(form, err.fields);
+        showError(alert, err.message);
+        submit.disabled = false;
+      }
+    });
+    page(head, steps(), h('div', { class: 'card' }, form));
+  }
+
   render();
 }
 
@@ -224,6 +383,19 @@ const OPEN_DOC = ['Изискан', 'Нужна корекция'];
 const ACCEPT = '.pdf,.jpg,.jpeg,.png,.heic,.heif,.docx,application/pdf,image/jpeg,image/png,image/heic';
 const MAX_BYTES = 10 * 1024 * 1024;
 
+// Документите, които БУЛАДМИН е изпратил по заявката. Изтеглят се само оттук, не идват по имейл.
+function receivedSection(files) {
+  const received = files.filter((f) => f.source === 'Оператор').reverse();
+  if (!received.length) return null;
+  return h('section', { class: 'card stack', 'aria-labelledby': 'received-title' },
+    h('h2', { id: 'received-title', class: 'card__title' }, 'Документи от БУЛАДМИН'),
+    h('ul', { class: 'file-list' }, received.map((f) => h('li', { class: 'file-row' },
+      icon('doc', 18),
+      h('span', { class: 'file-row__name' },
+        h('a', { href: `/api/files/${f.id}`, download: f.fileName }, f.fileName),
+        h('span', { class: 'small muted' }, ` · ${formatSize(f.size)} · ${formatTime(f.uploadedAt)}`))))));
+}
+
 function documentsSection(requestId, documents, files) {
   if (!documents.length) return null;
   const reload = async () => {
@@ -231,7 +403,7 @@ function documentsSection(requestId, documents, files) {
     await viewRequest(requestId);
     window.scrollTo(0, y);
   };
-  const current = (doc, status) => files.filter((f) => f.docId === doc.id && f.round === doc.round && f.fileStatus === status);
+  const current = (doc, status) => files.filter((f) => f.docId === doc.id && f.round === doc.round && f.fileStatus === status && f.source !== 'Оператор');
   const open = documents.filter((d) => OPEN_DOC.includes(d.docStatus));
   const ready = open.every((d) => current(d, 'Чернова').length > 0);
 
@@ -363,6 +535,9 @@ async function viewRequest(id) {
     h('div', { class: 'split' },
       h('div', { class: 'stack' },
         h('div', { class: 'card stack' }, tracker(r.requestStatus), h('p', { class: 'pre' }, r.details)),
+        r.form && state.meta.forms[r.formKey] && h('details', { class: 'card' },
+          h('summary', {}, 'Данни в декларацията'), formView(state.meta.forms[r.formKey], r.form)),
+        receivedSection(files),
         documentsSection(id, documents, files),
         h('section', { class: 'stack', 'aria-labelledby': 'history-title' },
           h('h2', { id: 'history-title' }, 'Разговор и история'),

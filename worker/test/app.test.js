@@ -1281,3 +1281,172 @@ test('Graph: при 429 опитва отново', async () => {
   assert.deepEqual(await store.list('events'), []);
   assert.equal(attempts, 2);
 });
+
+// --- Декларации ---
+
+const person = {
+  fullName: 'Иван Петров Иванов', egn: '7501020018', citizenship: 'българско', idNumber: '645123456',
+  idIssuedOn: '2020-05-10', idIssuedBy: 'МВР – Варна', address: 'Варна, ул. Трета 3', publicOffice: 'Не',
+};
+const media7a = {
+  serviceCategory: 'Фирмени декларации',
+  service: 'Декларация по чл. 7а за доставчик на медийни услуги',
+  peopleInformed: true,
+  form: {
+    company: { notifyEmail: 'office@example.com', website: 'www.primer.bg', isPublic: 'Не' },
+    mediaServices: { rows: [{ name: 'Радио Пример', type: 'Радио' }] },
+    owners: { rows: [person] },
+    representatives: { rows: [person] },
+    controllers: { none: true },
+    financing: { rows: [{ amount: '1 500,5', basis: 'Договор за реклама', source: 'Фирма ООД, ЕИК 123456786' }] },
+    contracts: { none: true },
+  },
+};
+const spb2 = {
+  serviceCategory: 'Фирмени декларации',
+  service: 'Декларация СПБ-2 за сметка в чужбина (БНБ)',
+  form: {
+    declaration: { type: 'Първоначална' },
+    holder: { knownToBnb: 'Да', city: 'остава скрито' },
+    account: {
+      cashPool: 'Не', term: 'Безсрочна/Дългосрочна', transferable: 'Прехвърляема', openedOn: '2026-10-20',
+      currency: 'eur', bankName: 'Wise Europe SA', country: 'BE',
+    },
+    counterparty: { relation: 'Несвързани чуждестранни лица', sector: 'Дружества за електронни пари' },
+    interest: { method: 'Плаващ лихвен процент', floatBase: 'Число', floatBaseNumber: '2,25', margin: '-0,5' },
+    declarant: { fullName: 'Иван Иванов', position: 'Управител', phone: '0888123456', email: 'office@example.com' },
+  },
+};
+
+test('декларация 7а: записва се по полета, описанието е без ЕГН, клиентът вижда ЕГН скрито', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  const res = await call(app, 'POST', '/api/requests', { as: 'bob', body: media7a });
+  assert.equal(res.status, 201, JSON.stringify(res.data));
+  const [row] = store.tables.requests;
+  assert.equal(row.formKey, 'media-7a');
+  const saved = JSON.parse(row.formData);
+  assert.equal(saved.company.eik, '123456786');
+  assert.equal(saved.owners.rows[0].egn, '7501020018');
+  assert.equal(saved.financing.rows[0].amount, '1500.50');
+  assert.ok(!('publicOfficeDetails' in saved.owners.rows[0]));
+  assert.ok(!row.details.includes('7501020018') && row.details.includes('Радио Пример (Радио)'));
+  assert.ok(!JSON.stringify(res.data).includes('7501020018'));
+  assert.equal(res.data.request.form.owners.rows[0].egn, '••••••••18');
+
+  const list = await call(app, 'GET', '/api/admin/overview', { as: 'plain' });
+  assert.ok(!JSON.stringify(list.data.requests).includes('7501020018'));
+});
+
+test('декларация 7а: грешките сочат точното поле, а „Неприложимо“ и потвърждението се проверяват', async () => {
+  const { app } = setup();
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  const bad = structuredClone(media7a);
+  bad.peopleInformed = false;
+  bad.form.owners.rows[0] = { ...person, egn: '7501020019', publicOffice: 'Да' };
+  bad.form.representatives = { rows: [] };
+  bad.form.controllers = {};
+  bad.form.financing.rows[0].amount = '0';
+  const res = await call(app, 'POST', '/api/requests', { as: 'bob', body: bad });
+  assert.equal(res.status, 422);
+  for (const key of ['peopleInformed', 'form.owners.0.egn', 'form.owners.0.publicOfficeDetails', 'form.representatives', 'form.controllers', 'form.financing.0.amount']) {
+    assert.ok(res.data.error.fields[key], key);
+  }
+});
+
+test('фирмените декларации са само за юридически лица', async () => {
+  const { app } = setup();
+  await registered(app);
+  const res = await call(app, 'POST', '/api/requests', { as: 'alice', body: media7a });
+  assert.equal(res.status, 422);
+});
+
+test('СПБ-2: скритите полета не се пазят, валутата и процентите се нормализират', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  const res = await call(app, 'POST', '/api/requests', { as: 'bob', body: spb2 });
+  assert.equal(res.status, 201, JSON.stringify(res.data));
+  const saved = JSON.parse(store.tables.requests[0].formData);
+  assert.deepEqual(saved.holder, { knownToBnb: 'Да' });
+  assert.equal(saved.account.currency, 'EUR');
+  assert.ok(!('poolLeader' in saved.account));
+  assert.equal(saved.interest.floatBaseNumber, '2.25');
+  assert.equal(saved.interest.margin, '-0.5');
+  assert.ok(store.tables.requests[0].details.includes('Wise Europe SA, BE, EUR, 2026-10-20'));
+
+  const bad = structuredClone(spb2);
+  bad.form.declaration.type = 'Коригираща';
+  bad.form.holder.knownToBnb = 'Не';
+  bad.form.account.cashPool = 'Физическа сметка (physical cash pool)';
+  bad.form.account.openedOn = '2999-01-01';
+  const refused = await call(app, 'POST', '/api/requests', { as: 'bob', body: bad });
+  assert.equal(refused.status, 422);
+  for (const key of ['form.declaration.bnbNumber', 'form.holder.latinName', 'form.holder.activityCode', 'form.account.poolLeader', 'form.account.openedOn']) {
+    assert.ok(refused.data.error.fields[key], key);
+  }
+});
+
+test('пълни данни от декларация: само за оператор и със запис в историята', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  const { data } = await call(app, 'POST', '/api/requests', { as: 'bob', body: media7a });
+  const id = data.request.id;
+  const masked = await call(app, 'GET', `/api/admin/requests/${id}`, { as: 'plain' });
+  assert.equal(masked.data.request.form.owners.rows[0].egn, '••••••••18');
+  assert.ok(!('formData' in masked.data.request));
+  assert.equal((await call(app, 'POST', `/api/admin/requests/${id}/form`, { as: 'bob' })).status, 403);
+  const full = await call(app, 'POST', `/api/admin/requests/${id}/form`, { as: 'plain' });
+  assert.equal(full.data.form.owners.rows[0].egn, '7501020018');
+  const event = store.tables.events.find((e) => e.requestId === id && e.action === 'Преглед на пълните данни от декларацията');
+  assert.equal(event.visibility, 'Вътрешно');
+});
+
+// --- Документи от оператора към клиента ---
+
+async function sendToClient(app, as, requestId, bytes, name = 'декларация.pdf') {
+  const cookie = `${SESSION_COOKIE}=${await signToken(users[as], env.SESSION_SECRET, 3600)}`;
+  const res = await app(new Request(`${ORIGIN}/api/admin/requests/${requestId}/outgoing`, {
+    method: 'POST',
+    headers: { cookie, origin: ORIGIN, 'content-type': 'application/octet-stream', 'x-file-name': encodeURIComponent(name) },
+    body: bytes,
+  }));
+  return { status: res.status, data: await res.json() };
+}
+
+test('оператор изпраща документ: чернова е невидима, след изпращане клиентът го изтегля и получава имейл', async () => {
+  const { store } = setup();
+  const app = createApp({ env: { ...env, MAIL_ENABLED: 'true', MAIL_NOREPLY: 'no-reply@portal.test' }, store });
+  const requestId = await withRequest(app);
+  assert.equal((await sendToClient(app, 'alice', requestId, PDF)).status, 403);
+  assert.equal((await sendToClient(app, 'plain', requestId, PNG.slice(0, 4))).status, 415);
+  const up = await sendToClient(app, 'plain', requestId, PDF);
+  assert.equal(up.status, 201);
+  const fileId = up.data.file.id;
+
+  const before = await call(app, 'GET', `/api/requests/${requestId}`, { as: 'alice' });
+  assert.equal(before.data.files.length, 0);
+  assert.equal((await call(app, 'GET', `/api/files/${fileId}`, { as: 'alice' })).status, 404);
+  // Клиентът не може да изтрие файл на оператора.
+  assert.equal((await call(app, 'DELETE', `/api/requests/${requestId}/files/${fileId}`, { as: 'alice' })).status, 404);
+
+  const mailsBefore = store.sentMail.length;
+  const sent = await call(app, 'POST', `/api/admin/requests/${requestId}/outgoing/send`, { as: 'plain', body: { message: 'Моля, подпишете.' } });
+  assert.equal(sent.status, 201);
+  assert.equal(store.sentMail.length, mailsBefore + 1);
+  assert.equal(store.sentMail.at(-1).to, 'alice@example.com');
+  assert.ok(store.sentMail.at(-1).text.includes('декларация.pdf'));
+
+  const after = await call(app, 'GET', `/api/requests/${requestId}`, { as: 'alice' });
+  assert.equal(after.data.files[0].source, 'Оператор');
+  assert.ok(after.data.events.some((e) => e.message === 'Моля, подпишете.' && e.actorName === 'БУЛАДМИН'));
+  const download = await app(new Request(`${ORIGIN}/api/files/${fileId}`, {
+    headers: { cookie: `${SESSION_COOKIE}=${await signToken(users.alice, env.SESSION_SECRET, 3600)}` },
+  }));
+  assert.equal(download.status, 200);
+  assert.equal(download.headers.get('content-type'), 'application/pdf');
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  assert.equal((await call(app, 'GET', `/api/files/${fileId}`, { as: 'bob' })).status, 404);
+
+  assert.equal((await call(app, 'DELETE', `/api/admin/requests/${requestId}/outgoing/${fileId}`, { as: 'plain' })).status, 409);
+  assert.equal((await call(app, 'POST', `/api/admin/requests/${requestId}/outgoing/send`, { as: 'plain', body: {} })).status, 422);
+});

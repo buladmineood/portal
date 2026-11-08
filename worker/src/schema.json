@@ -44,6 +44,8 @@
       { "name": "serviceCategory", "label": "Категория", "kind": "text" },
       { "name": "service", "label": "Услуга", "kind": "text" },
       { "name": "details", "label": "Описание", "kind": "multiline" },
+      { "name": "formKey", "label": "Вид форма", "kind": "text" },
+      { "name": "formData", "label": "Данни от формата", "kind": "multiline" },
       { "name": "requestStatus", "label": "Статус", "kind": "choice", "choices": ["Нова", "Уточняване", "Подготвена", "Подадена", "Проследява се", "Получена", "Отказана"], "indexed": true },
       { "name": "assignedTo", "label": "Отговорен оператор", "kind": "text", "indexed": true },
       { "name": "department", "label": "Отдел", "kind": "text", "indexed": true }
@@ -118,7 +120,9 @@
       { "name": "size", "label": "Размер (байта)", "kind": "text" },
       { "name": "driveItemId", "label": "ID в библиотеката", "kind": "text" },
       { "name": "round", "label": "Опит", "kind": "text" },
-      { "name": "fileStatus", "label": "Статус", "kind": "choice", "choices": ["Чернова", "Изпратен", "Заменен", "Изтрит"], "indexed": true }
+      { "name": "fileStatus", "label": "Статус", "kind": "choice", "choices": ["Чернова", "Изпратен", "Заменен", "Изтрит"], "indexed": true },
+      { "name": "source", "label": "Изпратен от", "kind": "choice", "choices": ["Клиент", "Оператор"] },
+      { "name": "sentBy", "label": "Оператор", "kind": "text" }
     ]
   },
   "departments": {

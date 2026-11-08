@@ -619,3 +619,32 @@ td a:hover { text-decoration: underline; }
 .prose ul { list-style: disc; padding-left: 22px; }
 .prose li + li { margin-top: 4px; }
 .prose p + p { margin-top: 10px; }
+
+/* Съобщение за бисквитките */
+.cookie-notice {
+  position: fixed; z-index: 50; left: 16px; right: 16px; bottom: 16px;
+  max-width: 560px; margin-inline: auto;
+  display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap;
+  padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--paper); color: var(--ink); font-size: .9rem; line-height: 1.45;
+  box-shadow: 0 8px 28px rgb(16 41 76 / .16);
+}
+.cookie-notice p { flex: 1 1 260px; }
+.cookie-notice .btn { flex: none; }
+@media print { .cookie-notice { display: none; } }
+
+/* Декларации */
+.field input[type="date"] {
+  width: 100%; min-height: 44px; padding: 9px 12px;
+  border: 1px solid var(--field-line); border-radius: 8px; background: var(--paper); color: var(--ink);
+  font: inherit;
+}
+.form-section { display: grid; gap: 14px; padding-top: 18px; border-top: 1px solid var(--line); }
+.form-section > legend { float: left; width: 100%; margin-bottom: 4px; font-size: 1.05rem; font-weight: 650; }
+.form-section > legend + * { clear: both; }
+.form-row { display: grid; gap: 14px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); }
+.form-row__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-weight: 600; }
+.yesno { display: inline-grid; grid-template-columns: 1fr 1fr; min-width: 180px; }
+.form-view h3 { margin-bottom: 8px; }
+.form-view section + section { padding-top: 14px; border-top: 1px solid var(--line); }
+.form-view__row + .form-view__row { margin-top: 12px; }

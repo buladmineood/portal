@@ -1,9 +1,9 @@
 import {
-  api, canRefreshNow, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatSize, formatTime, formDialog, formValues, h, icon,
+  api, canRefreshNow, confirmDialog, contactFields, copyButton, emptyState, fatal, formatDate, formatSize, formatTime, formDialog, formValues, formView, h, icon,
   identityFields, linkBox,
   loginLabel, markClean, markDirty, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill,
-  timeAgo, toast,
-} from './core.js?v=4ddb93421e';
+  timeAgo, toast, uploadFile,
+} from './core.js?v=d37ae0875d';
 
 let shell;
 let main;
@@ -328,6 +328,86 @@ async function askForDocuments(requestId) {
   return !!saved;
 }
 
+const OUTGOING_ACCEPT = '.pdf,.jpg,.jpeg,.png,.heic,.heif,.docx,application/pdf,image/jpeg,image/png,image/heic';
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+// Файловете се качват като чернова, видима само за операторите, и се изпращат наведнъж:
+// клиентът получава едно известие и ги изтегля от заявката.
+function outgoingDocuments(requestId, files) {
+  const reload = async () => {
+    const y = window.scrollY;
+    await viewRequest(requestId);
+    window.scrollTo(0, y);
+  };
+  const outgoing = files.filter((f) => f.source === 'Оператор');
+  const drafts = outgoing.filter((f) => f.fileStatus === 'Чернова');
+  const sent = outgoing.filter((f) => f.fileStatus === 'Изпратен').reverse();
+  const alert = h('div', { 'aria-live': 'polite' });
+
+  const picker = h('input', {
+    type: 'file', multiple: true, accept: OUTGOING_ACCEPT, class: 'sr-only', id: `out-${requestId}`,
+    onchange: async () => {
+      const chosen = [...picker.files];
+      picker.value = '';
+      for (const file of chosen) {
+        if (file.size > MAX_UPLOAD_BYTES) {
+          toast(`„${file.name}“ е над 10 MB.`, 'error');
+          continue;
+        }
+        try {
+          await uploadFile(`/admin/requests/${encodeURIComponent(requestId)}/outgoing`, file);
+        } catch (err) {
+          toast(`„${file.name}“: ${err.message}`, 'error');
+        }
+      }
+      await reload();
+    },
+  });
+  const remove = (f) => async () => {
+    try {
+      await api(`/admin/requests/${encodeURIComponent(requestId)}/outgoing/${encodeURIComponent(f.id)}`, { method: 'DELETE' });
+      await reload();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+  const fileRow = (f, removable) => h('li', { class: 'file-row' }, icon('doc', 18),
+    h('span', { class: 'file-row__name' },
+      h('a', { href: `/api/admin/files/${f.id}`, download: f.fileName }, f.fileName),
+      h('span', { class: 'small muted' }, ` · ${formatSize(f.size)}${removable ? '' : ` · ${formatTime(f.uploadedAt)}`}`)),
+    removable && h('button', { class: 'icon-btn', type: 'button', 'aria-label': `Премахнете ${f.fileName}`, onclick: remove(f) }, icon('close', 16)));
+
+  const send = h('button', { class: 'btn btn--small', type: 'submit', disabled: !drafts.length }, icon('send', 16), 'Изпратете на клиента');
+  const form = h('form', { class: 'form', novalidate: true },
+    drafts.length > 0 && h('ul', { class: 'file-list' }, drafts.map((f) => fileRow(f, true))),
+    h('div', {}, picker, h('label', { class: 'btn btn--ghost btn--small', for: picker.id }, icon('plus', 16), drafts.length ? 'Добавете още файлове' : 'Изберете файлове')),
+    drafts.length > 0 && h('div', { class: 'field' },
+      h('label', { for: `f-out-message-${requestId}` }, 'Съобщение към клиента', h('span', { class: 'field__hint' }, ' (по желание)')),
+      h('textarea', { id: `f-out-message-${requestId}`, name: 'message', maxlength: 2000, placeholder: 'Например: изпращаме попълнената декларация за проверка и подпис.' })),
+    alert,
+    drafts.length > 0 && h('div', { class: 'row' }, send, h('span', { class: 'small muted' }, 'Клиентът ще получи имейл и ще ги изтегли от портала.')));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    send.disabled = true;
+    try {
+      await api(`/admin/requests/${encodeURIComponent(requestId)}/outgoing/send`, { method: 'POST', body: formValues(form) });
+      toast('Документите са изпратени на клиента.');
+      await reload();
+    } catch (err) {
+      showError(alert, err.message);
+      send.disabled = false;
+    }
+  });
+
+  return h('section', { class: 'card stack', 'aria-labelledby': `out-title-${requestId}` },
+    h('h2', { id: `out-title-${requestId}`, class: 'card__title' }, 'Изпратете документи на клиента'),
+    h('p', { class: 'small muted' }, `${ALLOWED_TYPES}, до 10 MB на файл. Докато не ги изпратите, клиентът не ги вижда.`),
+    form,
+    sent.length > 0 && h('details', { class: 'small' }, h('summary', {}, `Изпратени до клиента (${sent.length})`),
+      h('ul', { class: 'file-list' }, sent.map((f) => fileRow(f, false)))));
+}
+const ALLOWED_TYPES = 'PDF, JPG, PNG, HEIC или DOCX';
+
 function operatorDocuments(requestId, documents, files) {
   const reload = async () => {
     const y = window.scrollY;
@@ -480,7 +560,9 @@ async function viewRequest(id) {
           progress(r.requestStatus),
           h('h2', { class: 'card__title' }, 'Описание от клиента'),
           h('p', { class: 'pre' }, r.details)),
+        r.form && meta.forms[r.formKey] && declarationCard(id, meta.forms[r.formKey], r.form),
         operatorDocuments(id, detail.documents || [], detail.files || []),
+        outgoingDocuments(id, detail.files || []),
         h('section', { class: 'stack', 'aria-labelledby': 'history-title' },
           h('h2', { id: 'history-title' }, 'История'),
           h('ol', { class: 'timeline' }, detail.events.map((e) =>
@@ -501,6 +583,27 @@ async function viewRequest(id) {
           h('p', { class: 'small muted row-tight' }, `№ ${r.id}`, copyButton(r.id, 'Копирайте номера'))),
         h('div', { class: 'card' }, h('h2', { class: 'card__title' }, 'Клиент'), clientCard(detail.client)))),
   );
+}
+
+// Данните от декларацията идват с ЕГН, скрито до 2 цифри. Пълните се зареждат при изрично действие, което остава в историята.
+function declarationCard(id, definition, masked) {
+  const body = h('div', {}, formView(definition, masked));
+  const hasEgn = definition.sections.some((s) => s.fields.some((f) => f.kind === 'egn'));
+  const reveal = hasEgn && h('button', {
+    class: 'btn btn--ghost btn--small', type: 'button',
+    onclick: async () => {
+      try {
+        const { form } = await api(`/admin/requests/${encodeURIComponent(id)}/form`, { method: 'POST' });
+        body.replaceChildren(formView(definition, form));
+        reveal.remove();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    },
+  }, icon('lock', 16), 'Покажи пълните ЕГН');
+  return h('div', { class: 'card stack' },
+    h('div', { class: 'row row--between' }, h('h2', { class: 'card__title' }, definition.title), reveal),
+    body);
 }
 
 // --- Клиенти ---

@@ -1,5 +1,5 @@
 import PLACES from '../../assets/data/places.json' with { type: 'json' };
-import { PERSON_TYPES } from './catalog.js';
+import { isShown, MAX_FORM_ROWS, PERSON_TYPES } from './catalog.js';
 
 export function clean(value, max, { multiline = false } = {}) {
   if (typeof value !== 'string') return '';
@@ -136,3 +136,115 @@ export function validateRegistration(body) {
 
 export const displayName = (c) =>
   c.companyName || [c.firstName, c.lastName].filter(Boolean).join(' ');
+
+// --- Структурирани форми (декларации, виж FORMS в catalog.js) ---
+
+const YES = 'Да';
+const NO = 'Не';
+const WEBSITE = /^(https?:\/\/)?[\p{L}\d-]+(\.[\p{L}\d-]+)+(\/\S*)?$/u;
+
+function isPastDate(value, today) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().startsWith(value) && value >= '1950-01-01' && value <= today;
+}
+
+// Приема „1 234,50“ или „1234.5“ и връща „1234.50“.
+function normalizeAmount(value) {
+  const compact = value.replace(/[\s\u00A0]/g, '').replace(',', '.');
+  if (!/^\d{1,12}(\.\d{1,2})?$/.test(compact)) return null;
+  const amount = Number(compact);
+  return amount > 0 ? amount.toFixed(2) : null;
+}
+
+// Процент с до 4 знака след десетичната запетая; може да е отрицателен (например при ESTR).
+function normalizePercent(value) {
+  const compact = value.replace(/[\s%]/g, '').replace(',', '.');
+  if (!/^-?\d{1,3}(\.\d{1,4})?$/.test(compact) || Math.abs(Number(compact)) > 100) return null;
+  return String(Number(compact));
+}
+
+function validateFormField(field, raw, today) {
+  const value = clean(typeof raw === 'string' ? raw : '', field.max || 200);
+  if (!value) return { value, error: field.required ? 'Попълнете полето.' : null };
+  switch (field.kind) {
+    case 'email':
+      return { value: value.toLowerCase(), error: EMAIL.test(value) ? null : 'Въведете валиден имейл.' };
+    case 'egn':
+      return { value, error: isValidEgnOrLnch(value) ? null : 'Въведете валидно ЕГН или ЛНЧ от 10 цифри.' };
+    case 'date':
+      return { value, error: isPastDate(value, today) ? null : 'Въведете валидна дата, която не е в бъдещето.' };
+    case 'amount': {
+      const amount = normalizeAmount(value);
+      return { value: amount || value, error: amount ? null : 'Въведете сума, например 1500 или 1500,50.' };
+    }
+    case 'percent': {
+      const percent = normalizePercent(value);
+      return { value: percent ?? value, error: percent !== null ? null : 'Въведете процент, например 2,5.' };
+    }
+    case 'currency': {
+      const code = value.toUpperCase();
+      return { value: code, error: /^[A-Z]{3}$/.test(code) ? null : 'Въведете трибуквен код на валутата, например EUR или USD.' };
+    }
+    case 'yesno':
+      return { value, error: value === YES || value === NO ? null : 'Изберете „Да“ или „Не“.' };
+    case 'choice':
+      return { value, error: field.options.includes(value) ? null : 'Изберете от списъка.' };
+    default:
+      if (field.name === 'website' && !WEBSITE.test(value)) return { value, error: 'Въведете адрес като www.primer.bg.' };
+      if (field.pattern && !new RegExp(field.pattern, 'u').test(value)) return { value, error: field.patternError || 'Проверете стойността.' };
+      return { value, error: null };
+  }
+}
+
+// Проверява един ред (или единичната секция). Поле с showIf се пази само ако условието е изпълнено
+// според вече проверените полета, така че скрито поле скрива и зависещите от него.
+function validateFormRow(fields, input, prefix, errors, today) {
+  const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const row = {};
+  for (const field of fields) {
+    if (!isShown(field, row)) continue;
+    const { value, error } = validateFormField(field, source[field.name], today);
+    row[field.name] = value;
+    if (error) errors[`${prefix}.${field.name}`] = error;
+  }
+  return row;
+}
+
+// Връща { data, errors }. Ключовете на грешките съвпадат с имената на полетата във формата: form.<секция>.<ред>.<поле>.
+export function validateForm(definition, input, today = new Date().toISOString().slice(0, 10)) {
+  const body = input && typeof input === 'object' ? input : {};
+  const data = {};
+  const errors = {};
+  for (const section of definition.sections) {
+    const key = `form.${section.name}`;
+    if (!section.list) {
+      data[section.name] = validateFormRow(section.fields, body[section.name], key, errors, today);
+      continue;
+    }
+    const given = body[section.name] && typeof body[section.name] === 'object' ? body[section.name] : {};
+    const none = !!section.optional && given.none === true;
+    const rows = none || !Array.isArray(given.rows) ? [] : given.rows;
+    if (rows.length > MAX_FORM_ROWS) {
+      errors[key] = `Най-много ${MAX_FORM_ROWS} реда. За повече ни пишете след като подадете заявката.`;
+      continue;
+    }
+    if (!none && rows.length === 0) {
+      errors[key] = section.optional ? 'Добавете поне един ред или отбележете „Неприложимо“.' : 'Добавете поне един ред.';
+    }
+    data[section.name] = { none, rows: rows.map((row, i) => validateFormRow(section.fields, row, `${key}.${i}`, errors, today)) };
+  }
+  return { data, errors };
+}
+
+// ЕГН в записана форма се показва скрито, докато оператор изрично не поиска пълните данни.
+export function maskFormData(definition, data) {
+  const masked = structuredClone(data || {});
+  for (const section of definition.sections) {
+    const egnFields = section.fields.filter((f) => f.kind === 'egn').map((f) => f.name);
+    if (!egnFields.length) continue;
+    const rows = section.list ? masked[section.name]?.rows || [] : [masked[section.name] || {}];
+    for (const row of rows) for (const name of egnFields) if (row[name]) row[name] = maskEgn(row[name]);
+  }
+  return masked;
+}

@@ -1,4 +1,6 @@
-import { CATALOG, CONSENT_VERSION, PRIVACY_RIGHTS, PRIVACY_STATUSES, STATUSES } from './catalog.js';
+import {
+  CATALOG, CONSENT_VERSION, FORMS, MAX_FORM_CHARS, PRIVACY_RIGHTS, PRIVACY_STATUSES, SERVICE_FORMS, STATUSES,
+} from './catalog.js';
 import {
   b64url, hashPassword, randomCode, randomDigits, randomToken, safeEqual, sha256, signToken, verifyPassword, verifyToken,
 } from './crypto.js';
@@ -9,7 +11,7 @@ import {
 import { beginLogin, completeLogin, isProvider } from './oauth.js';
 import schema from './schema.json' with { type: 'json' };
 import {
-  clean, displayName, isValidEgnOrLnch, isValidEmail, maskEgn, passwordError, validateRegistration,
+  clean, displayName, isValidEgnOrLnch, isValidEmail, maskEgn, maskFormData, passwordError, validateForm, validateRegistration,
 } from './validate.js';
 
 export const SESSION_COOKIE = '__Host-ba_session';
@@ -91,8 +93,45 @@ const DAY_FORMAT = new Intl.DateTimeFormat('bg-BG', { day: 'numeric', month: 'lo
 const formatDay = (iso) => DAY_FORMAT.format(new Date(iso));
 
 const shownValue = (key, value) => (SENSITIVE_FIELDS.includes(key) ? maskEgn(value) : value ?? '');
+// Данните от декларация се пазят като JSON в колоната formData. Навън излизат разчетени и с ЕГН, скрито до 2 цифри.
+function readForm(r) {
+  const definition = FORMS[r.formKey];
+  if (!definition || !r.formData) return null;
+  try {
+    return { definition, data: JSON.parse(r.formData) };
+  } catch {
+    return null;
+  }
+}
+function withMaskedForm(r) {
+  const { formData, ...rest } = r;
+  const form = readForm(r);
+  return form ? { ...rest, form: maskFormData(form.definition, form.data) } : rest;
+}
 function publicRequest(r) {
-  const { assignedTo, ...rest } = r;
+  const { assignedTo, ...rest } = withMaskedForm(r);
+  return rest;
+}
+// Кратко описание на декларацията за колоната „Описание“: без ЕГН и лични данни на трети лица.
+function formSummary(definition, data, note) {
+  const lines = [definition.title, `Дружество: ${data.company.companyName}, ЕИК ${data.company.eik}`];
+  for (const section of definition.sections.filter((s) => s.list)) {
+    const value = data[section.name];
+    if (value.none) lines.push(`${section.label}: неприложимо`);
+    else if (section.name === 'mediaServices') lines.push(`${section.label}: ${value.rows.map((r) => `${r.name} (${r.type})`).join('; ')}`);
+    else lines.push(`${section.label}: ${value.rows.length}`);
+  }
+  for (const { section, fields } of definition.summary || []) {
+    const label = definition.sections.find((s) => s.name === section).label;
+    lines.push(`${label}: ${fields.map((f) => data[section][f]).filter(Boolean).join(', ')}`);
+  }
+  if (note) lines.push('', `Бележка от клиента: ${note}`);
+  return lines.join('\n');
+}
+
+// Списъкът при операторите не носи данните от декларациите; те се зареждат при отваряне на заявката.
+function listedRequest(r) {
+  const { formData, ...rest } = r;
   return rest;
 }
 function publicEvent(e) {
@@ -205,12 +244,12 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     return operator;
   }
 
-  async function readBody(request) {
+  async function readBody(request, maxChars = MAX_BODY) {
     if (!(request.headers.get('content-type') || '').startsWith('application/json')) {
       throw new HttpError(415, 'Невалидна заявка.');
     }
     const text = await request.text();
-    if (text.length > MAX_BODY) throw new HttpError(413, 'Текстът е твърде дълъг.');
+    if (text.length > maxChars) throw new HttpError(413, 'Текстът е твърде дълъг.');
     try {
       const body = JSON.parse(text);
       if (body && typeof body === 'object' && !Array.isArray(body)) return body;
@@ -1113,21 +1152,28 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   const OPEN_DOC = ['Изискан', 'Нужна корекция'];
   const publicFile = (f) => ({
     id: f.id, docId: f.docId, fileName: f.fileName, mimeType: f.mimeType, size: Number(f.size || 0),
-    uploadedAt: f.uploadedAt, round: Number(f.round || 1), fileStatus: f.fileStatus,
+    uploadedAt: f.uploadedAt, round: Number(f.round || 1), fileStatus: f.fileStatus, source: f.source || 'Клиент',
   });
+  // Файловете, които операторът подготвя за клиента, са невидими за него, докато не бъдат изпратени.
+  const fromOperator = (f) => f.source === 'Оператор';
+  const visibleToClient = (f) => !fromOperator(f) || f.fileStatus === 'Изпратен';
+  const MAX_OUTGOING_DRAFTS = 10;
   const publicDocument = (d) => ({
     id: d.id, docTitle: d.docTitle, note: d.note, docStatus: d.docStatus, round: Number(d.round || 1),
     reason: d.reason, createdAt: d.createdAt, updatedAt: d.updatedAt,
   });
 
-  async function documentsFor(requestId) {
+  async function documentsFor(requestId, { forClient = false } = {}) {
     const [documents, files] = await Promise.all([
       store.find('documents', 'requestId', requestId),
       store.find('files', 'requestId', requestId),
     ]);
     return {
       documents: documents.filter((d) => d.docStatus !== 'Отменен').sort(byOldest('createdAt')).map(publicDocument),
-      files: files.filter((f) => f.fileStatus !== 'Изтрит').sort(byOldest('uploadedAt')).map(publicFile),
+      files: files
+        .filter((f) => f.fileStatus !== 'Изтрит' && (!forClient || visibleToClient(f)))
+        .sort(byOldest('uploadedAt'))
+        .map(publicFile),
     };
   }
 
@@ -1220,13 +1266,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function uploadDocumentFile(request, requestId, docId) {
     const session = await requireSession(request);
     const { client, doc } = await ownOpenDocument(session, requestId, docId);
-    const declared = Number(request.headers.get('content-length') || 0);
-    if (declared > MAX_FILE_BYTES) throw new HttpError(413, 'Файлът е над 10 MB.');
-    const bytes = new Uint8Array(await request.arrayBuffer());
-    if (!bytes.length) throw new HttpError(422, 'Файлът е празен.');
-    if (bytes.length > MAX_FILE_BYTES) throw new HttpError(413, 'Файлът е над 10 MB.');
-    const type = detectFileType(bytes, request.headers.get('x-file-name') || '');
-    if (!type) throw new HttpError(415, `Този вид файл не се приема. Качете ${ALLOWED_LABEL}.`);
+    const { bytes, type, fileName } = await readUpload(request);
     const round = String(doc.round || '1');
     const existing = (await store.find('files', 'docId', docId)).filter((f) => f.round === round && f.fileStatus === 'Чернова');
     if (existing.length >= MAX_FILES_PER_DOCUMENT) throw new HttpError(422, `Може да качите до ${MAX_FILES_PER_DOCUMENT} файла за един документ.`);
@@ -1234,9 +1274,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const id = `F-${crypto.randomUUID()}`;
     const driveItemId = await store.uploadFile(`Портал/Документи/${requestId}/${id}.${type.ext}`, bytes);
     const record = {
-      id, uploadedAt: nowIso(), docId, requestId, clientId: client.id,
-      fileName: cleanFileName(request.headers.get('x-file-name'), type.ext),
-      mimeType: type.mime, size: String(bytes.length), driveItemId, round, fileStatus: 'Чернова',
+      id, uploadedAt: nowIso(), docId, requestId, clientId: client.id, fileName,
+      mimeType: type.mime, size: String(bytes.length), driveItemId, round, fileStatus: 'Чернова', source: 'Клиент',
     };
     await store.create('files', record);
     return json({ file: publicFile(record) }, 201);
@@ -1246,7 +1285,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const session = await requireSession(request);
     const { record } = await ownRequest(session, requestId);
     const [file] = await store.find('files', 'id', fileId);
-    if (!file || file.requestId !== record.id) throw new HttpError(404, 'Файлът не е намерен.');
+    if (!file || file.requestId !== record.id || fromOperator(file)) throw new HttpError(404, 'Файлът не е намерен.');
     if (file.fileStatus !== 'Чернова') throw new HttpError(409, 'Изпратените файлове не могат да се изтриват.');
     await ownOpenDocument(session, requestId, file.docId);
     await store.deleteFile(file.driveItemId);
@@ -1290,7 +1329,77 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         action: { label: 'Прегледайте документите', url: `${env.PORTAL_ORIGIN}/admin.html#/r/${requestId}` },
       });
     }
-    return json(await documentsFor(requestId));
+    return json(await documentsFor(requestId, { forClient: true }));
+  }
+
+  // --- Документи от оператора към клиента: качват се като чернова и се изпращат наведнъж със съобщение ---
+
+  async function readUpload(request) {
+    const declared = Number(request.headers.get('content-length') || 0);
+    if (declared > MAX_FILE_BYTES) throw new HttpError(413, 'Файлът е над 10 MB.');
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    if (!bytes.length) throw new HttpError(422, 'Файлът е празен.');
+    if (bytes.length > MAX_FILE_BYTES) throw new HttpError(413, 'Файлът е над 10 MB.');
+    const type = detectFileType(bytes, request.headers.get('x-file-name') || '');
+    if (!type) throw new HttpError(415, `Този вид файл не се приема. Качете ${ALLOWED_LABEL}.`);
+    return { bytes, type, fileName: cleanFileName(request.headers.get('x-file-name'), type.ext) };
+  }
+
+  async function uploadOutgoingFile(request, requestId) {
+    const operator = requireOperator(await requireSession(request));
+    const [record] = await store.find('requests', 'id', requestId);
+    if (!record) throw new HttpError(404, 'Заявката не е намерена.');
+    const drafts = (await store.find('files', 'requestId', requestId)).filter((f) => fromOperator(f) && f.fileStatus === 'Чернова');
+    if (drafts.length >= MAX_OUTGOING_DRAFTS) throw new HttpError(422, `Може да изпратите до ${MAX_OUTGOING_DRAFTS} файла наведнъж.`);
+    const { bytes, type, fileName } = await readUpload(request);
+    const id = `F-${crypto.randomUUID()}`;
+    const driveItemId = await store.uploadFile(`Портал/Документи/${requestId}/${id}.${type.ext}`, bytes);
+    const file = {
+      id, uploadedAt: nowIso(), docId: '', requestId, clientId: record.clientId, fileName,
+      mimeType: type.mime, size: String(bytes.length), driveItemId, round: '1', fileStatus: 'Чернова',
+      source: 'Оператор', sentBy: operator.fullName || operator.id,
+    };
+    await store.create('files', file);
+    return json({ file: publicFile(file) }, 201);
+  }
+
+  async function deleteOutgoingDraft(request, requestId, fileId) {
+    requireOperator(await requireSession(request));
+    const [file] = await store.find('files', 'id', fileId);
+    if (!file || file.requestId !== requestId || !fromOperator(file)) throw new HttpError(404, 'Файлът не е намерен.');
+    if (file.fileStatus !== 'Чернова') throw new HttpError(409, 'Изпратените файлове не могат да се изтриват.');
+    await store.deleteFile(file.driveItemId);
+    await store.update('files', fileId, { fileStatus: 'Изтрит', driveItemId: '' });
+    return json({ ok: true });
+  }
+
+  async function sendOutgoingFiles(request, requestId) {
+    const operator = requireOperator(await requireSession(request));
+    const body = await readBody(request);
+    const message = clean(body.message, 2000, { multiline: true });
+    const [record] = await store.find('requests', 'id', requestId);
+    if (!record) throw new HttpError(404, 'Заявката не е намерена.');
+    const drafts = (await store.find('files', 'requestId', requestId)).filter((f) => fromOperator(f) && f.fileStatus === 'Чернова');
+    if (!drafts.length) throw new HttpError(422, 'Качете поне един файл.');
+    const at = nowIso();
+    for (const file of drafts) await store.update('files', file.id, { fileStatus: 'Изпратен', uploadedAt: at });
+    const names = drafts.map((f) => f.fileName);
+    await addEvent({
+      requestId, actorType: 'Оператор', actorName: operator.fullName || operator.id, visibility: 'Клиент',
+      action: `Изпратени документи към клиента: ${names.join(', ')}`, message,
+    });
+    await store.update('requests', requestId, { updatedAt: at });
+    await notifyClient(record.clientId, `Заявка ${requestId}: изпратихме Ви документи`, {
+      title: 'Имате нови документи в портала',
+      paragraphs: [
+        'Изпратихме Ви документи по заявката. От съображения за сигурност те не са приложени към този имейл, а се изтеглят от портала.',
+        ...(message ? [message] : []),
+      ],
+      status: record.requestStatus,
+      details: names.map((name, i) => [`Файл ${i + 1}`, name]),
+      action: { label: 'Изтеглете документите', url: requestUrl(requestId) },
+    });
+    return json(await documentsFor(requestId), 201);
   }
 
   // Изтегляне само през портала: проверка на правата, без вграждане в страницата и без изпълнение.
@@ -1299,7 +1408,10 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     const [file] = await store.find('files', 'id', fileId);
     if (!file || !file.driveItemId) throw new HttpError(404, 'Файлът не е намерен.');
     if (asOperator) requireOperator(session);
-    else await ownRequest(session, file.requestId);
+    else {
+      await ownRequest(session, file.requestId);
+      if (!visibleToClient(file)) throw new HttpError(404, 'Файлът не е намерен.');
+    }
     const body = await store.downloadFile(file.driveItemId);
     return new Response(body, {
       headers: {
@@ -1319,16 +1431,32 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (mailEnabled && session.provider === 'local' && !session.principal.emailVerifiedAt) {
       throw new HttpError(403, 'Първо потвърдете имейла си с линка, който Ви изпратихме.');
     }
-    const body = await readBody(request);
+    const body = await readBody(request, MAX_FORM_CHARS + 8000);
     const serviceCategory = clean(body.serviceCategory, 100);
     const service = clean(body.service, 100);
-    const details = clean(body.details, 4000, { multiline: true });
+    let details = clean(body.details, 4000, { multiline: true });
 
     const errors = {};
     const category = CATALOG.find((c) => c.name === serviceCategory);
     if (!category) errors.serviceCategory = 'Изберете категория.';
     else if (!category.services.includes(service)) errors.service = 'Изберете услуга.';
-    if (details.length < 10) errors.details = 'Опишете накратко какво трябва да се свърши.';
+    if (category?.companyOnly && !client.companyName) {
+      throw new HttpError(422, 'Тази услуга е само за юридически лица.');
+    }
+    // Услугите с форма (декларациите) събират данните по полета; описанието там е само бележка.
+    const formKey = category?.services.includes(service) ? SERVICE_FORMS[service] || '' : '';
+    let formData = '';
+    if (formKey) {
+      const { data, errors: formErrors } = validateForm(FORMS[formKey], body.form, now().toISOString().slice(0, 10));
+      Object.assign(errors, formErrors);
+      if (FORMS[formKey].thirdParties && body.peopleInformed !== true) errors.peopleInformed = 'Потвърдете, че лицата в декларацията са информирани.';
+      data.company = { companyName: client.companyName, eik: client.eik, ...data.company };
+      formData = JSON.stringify(data);
+      if (formData.length > MAX_FORM_CHARS) errors.form = 'Данните са твърде много за една заявка. Разделете ги или ни пишете.';
+      details = formSummary(FORMS[formKey], data, details);
+    } else if (details.length < 10) {
+      errors.details = 'Опишете накратко какво трябва да се свърши.';
+    }
     // Някои услуги изискват ЕГН/ЛНЧ; ако липсва в профила, клиентът го въвежда със заявката.
     const identityField = client.companyName ? 'representativeEgn' : 'egn';
     const identityNumber = clean(body.identityNumber, 10);
@@ -1358,6 +1486,8 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       serviceCategory,
       service,
       details,
+      formKey,
+      formData,
       requestStatus: 'Нова',
       assignedTo: '',
       department: await departmentForCategory(serviceCategory),
@@ -1395,7 +1525,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
   async function getOwnRequest(request, id) {
     const session = await requireSession(request);
     const { record } = await ownRequest(session, id);
-    const [events, docs] = await Promise.all([store.find('events', 'requestId', id), documentsFor(id)]);
+    const [events, docs] = await Promise.all([store.find('events', 'requestId', id), documentsFor(id, { forClient: true })]);
     return json({
       request: publicRequest(record),
       events: events.filter((e) => e.visibility === 'Клиент').sort(byOldest('occurredAt')).map(publicEvent),
@@ -1443,12 +1573,28 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       changes: changes.sort(byOldest('createdAt')).map((c) => changeView(c, clientById.get(c.clientId))),
       documentsToReview: toReview.sort(byOldest('updatedAt')).map((d) => ({ id: d.id, requestId: d.requestId, docTitle: d.docTitle, updatedAt: d.updatedAt })),
       privacy: isAdmin ? privacy.sort(byOldest('dueAt')) : undefined,
-      requests: requests.sort(byNewest('createdAt')),
+      requests: requests.sort(byNewest('createdAt')).map(listedRequest),
       clients: clients.sort(byNewest('createdAt')).map(publicClient),
       operators: operators.filter((o) => o.isActive === 'Да').map((o) => ({ email: o.id, name: o.fullName, department: o.department || '' })),
       departments: departments.map(publicDepartment).sort((a, b) => a.name.localeCompare(b.name, 'bg')),
       team: viewer.role === ADMIN_ROLE ? operators.map(publicOperator) : undefined,
     });
+  }
+
+  // Пълните данни от декларацията (с ЕГН) се дават само при изрично действие, което остава в историята.
+  async function adminRevealForm(request, id) {
+    const operator = requireOperator(await requireSession(request));
+    const [record] = await store.find('requests', 'id', id);
+    const form = record && readForm(record);
+    if (!form) throw new HttpError(404, 'Заявката няма данни от декларация.');
+    await addEvent({
+      requestId: id,
+      actorType: 'Оператор',
+      actorName: operator.fullName || operator.id,
+      action: 'Преглед на пълните данни от декларацията',
+      visibility: 'Вътрешно',
+    });
+    return json({ form: form.data });
   }
 
   async function adminGetRequest(request, id) {
@@ -1461,7 +1607,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       documentsFor(id),
     ]);
     return json({
-      request: record,
+      request: withMaskedForm(record),
       client: client ? publicClient(client) : null,
       events: events.sort(byOldest('occurredAt')),
       ...docs,
@@ -1493,7 +1639,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       if (department === null) throw new HttpError(422, 'Изберете съществуващ отдел.');
       patch.department = department;
     }
-    if (!Object.keys(patch).length) return json({ request: record });
+    if (!Object.keys(patch).length) return json({ request: withMaskedForm(record) });
 
     patch.updatedAt = nowIso();
     await store.update('requests', id, patch);
@@ -1537,7 +1683,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
         visibility: 'Вътрешно',
       });
     }
-    return json({ request: { ...record, ...patch } });
+    return json({ request: withMaskedForm({ ...record, ...patch }) });
   }
 
   async function adminPostMessage(request, id) {
@@ -1579,7 +1725,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
 
     if (method === 'GET' && path === '/api/meta') {
       return json({
-        catalog: CATALOG, statuses: STATUSES, mailEnabled, privacyRights: PRIVACY_RIGHTS, privacyStatuses: PRIVACY_STATUSES, dpoEmail: env.MAIL_DPO,
+        catalog: CATALOG, forms: FORMS, serviceForms: SERVICE_FORMS, statuses: STATUSES, mailEnabled, privacyRights: PRIVACY_RIGHTS, privacyStatuses: PRIVACY_STATUSES, dpoEmail: env.MAIL_DPO,
       });
     }
     if (method === 'GET' && path === '/api/profile/changes') return listOwnChanges(request);
@@ -1589,6 +1735,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (method === 'GET' && (m = path.match(/^\/api\/files\/([\w-]{1,60})$/))) return downloadFile(request, m[1], false);
     if (method === 'GET' && (m = path.match(/^\/api\/admin\/files\/([\w-]{1,60})$/))) return downloadFile(request, m[1], true);
     if (method === 'POST' && (m = path.match(/^\/api\/admin\/requests\/([\w-]{1,40})\/documents$/))) return requestDocuments(request, m[1]);
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/requests\/([\w-]{1,40})\/outgoing$/))) return uploadOutgoingFile(request, m[1]);
+    if (method === 'POST' && (m = path.match(/^\/api\/admin\/requests\/([\w-]{1,40})\/outgoing\/send$/))) return sendOutgoingFiles(request, m[1]);
+    if (method === 'DELETE' && (m = path.match(/^\/api\/admin\/requests\/([\w-]{1,40})\/outgoing\/([\w-]{1,60})$/))) return deleteOutgoingDraft(request, m[1], m[2]);
     if (method === 'POST' && (m = path.match(/^\/api\/admin\/documents\/([\w-]{1,60})\/review$/))) return reviewDocument(request, m[1]);
     if (path === '/api/privacy-requests') {
       if (method === 'GET') return listOwnPrivacy(request);
@@ -1646,6 +1795,7 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
       if (method === 'PATCH') return adminUpdateRequest(request, m[1]);
     }
     if ((m = path.match(/^\/api\/admin\/requests\/([\w-]{1,40})\/messages$/)) && method === 'POST') return adminPostMessage(request, m[1]);
+    if ((m = path.match(/^\/api\/admin\/requests\/([\w-]{1,40})\/form$/)) && method === 'POST') return adminRevealForm(request, m[1]);
     throw new HttpError(404, 'Няма такъв адрес.');
   }
 
