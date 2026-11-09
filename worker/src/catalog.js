@@ -18,6 +18,10 @@ export const CATALOG = [
       'Декларация СПБ-2 за сметка в чужбина (БНБ)',
     ],
   },
+  {
+    name: 'Търговски регистър', requiresIdentity: false,
+    services: ['Регистрация на ООД или ЕООД', 'Промени по партидата на ООД или ЕООД'],
+  },
 ];
 
 export const STATUSES = ['Нова', 'Уточняване', 'Подготвена', 'Подадена', 'Проследява се', 'Получена', 'Отказана'];
@@ -41,7 +45,7 @@ export const PRIVACY_STATUSES = ['Подадено', 'В обработка', '�
 // и за обявяване на разпространителите и доставчиците на медийни услуги) към Министерството на културата.
 // Полетата следват официалните образци Deklaracia7a-MK.pdf и Deklaracia7b-MK.pdf.
 //
-// Видове полета: text (по подразбиране), email, egn, date, amount, percent, currency, yesno, choice.
+// Видове полета: text (по подразбиране), email, egn, eik, date, amount, percent, currency, yesno, choice.
 // pattern/patternError: допълнителна проверка на текстово поле.
 // prefill: от кое поле на профила да се попълни първоначално.
 // showIf: { field, is } или { field, not }: полето се показва (и проверява) само при това условие в същия ред.
@@ -251,6 +255,121 @@ export const FORMS = {
   },
 };
 
+// --- Търговски регистър (Агенция по вписванията): заявление по образец А4 за ООД и ЕООД ---
+// Изготвяме документите, клиентът ги подписва, ние ги подаваме по електронен път и го уведомяваме след вписването.
+const TR_PROCESS = 'Ние изготвяме документите, Вие ги подписвате, ние ги подаваме по електронен път в Търговския регистър и Ви уведомяваме след вписването.';
+
+// Съдружник или ново лице: физическо или юридическо лице.
+const PARTY_FIELDS = [
+  { name: 'partyType', label: 'Лицето е', kind: 'choice', required: true, options: ['Физическо лице', 'Юридическо лице'] },
+  { name: 'fullName', label: 'Три имена', required: true, max: 150, wide: true, showIf: { field: 'partyType', is: 'Физическо лице' } },
+  { name: 'egn', label: 'ЕГН или ЛНЧ', kind: 'egn', required: true, showIf: { field: 'partyType', is: 'Физическо лице' } },
+  { name: 'companyName', label: 'Наименование', required: true, max: 200, wide: true, showIf: { field: 'partyType', is: 'Юридическо лице' } },
+  {
+    name: 'eik', label: 'ЕИК или регистрационен номер', required: true, max: 40, showIf: { field: 'partyType', is: 'Юридическо лице' },
+    hint: 'за чуждестранно лице – номерът и държавата на регистрация',
+  },
+  { name: 'address', label: 'Постоянен адрес или седалище', required: true, max: 200, wide: true },
+];
+
+Object.assign(FORMS, {
+  'tr-ood-new': {
+    title: 'Регистрация на ООД или ЕООД в Търговския регистър',
+    intro: `Първоначалното вписване се извършва до края на следващия работен ден след подаването. Държавната такса при електронно подаване е 28,12 €. ${TR_PROCESS}`,
+    thirdParties: true,
+    summary: [{ section: 'company', fields: ['legalForm', 'name', 'city'] }],
+    sections: [
+      {
+        name: 'company', label: 'Новото дружество',
+        fields: [
+          { name: 'legalForm', label: 'Правна форма', kind: 'choice', required: true, wide: true, options: ['ЕООД – с един собственик', 'ООД – с двама или повече съдружници'] },
+          { name: 'name', label: 'Желано наименование', required: true, max: 150, hint: 'без „ООД“ или „ЕООД“' },
+          { name: 'altName', label: 'Резервно наименование', max: 150, hint: 'ако желаното е заето' },
+          { name: 'latinName', label: 'Изписване на латиница', max: 150 },
+          { name: 'city', label: 'Седалище (населено място)', required: true, max: 100, prefill: 'city' },
+          { name: 'address', label: 'Адрес на управление', required: true, max: 200, wide: true },
+          { name: 'activity', label: 'Предмет на дейност', required: true, max: 1000, wide: true, placeholder: 'Например: търговия със стоки, консултантски услуги' },
+          { name: 'capital', label: 'Капитал (€)', kind: 'amount', required: true },
+          { name: 'contribution', label: 'Вид на вноската', kind: 'choice', required: true, options: ['Парична', 'Непарична', 'Парична и непарична'] },
+          {
+            name: 'nonCash', label: 'Какво се внася като непарична вноска', required: true, max: 500, wide: true,
+            hint: 'имот, превозно средство, вземане, права и др.; за нея е нужна оценка от вещи лица', showIf: { field: 'contribution', not: 'Парична' },
+          },
+          {
+            name: 'management', label: 'Управление', kind: 'choice', required: true, wide: true,
+            options: ['Един управител', 'Няколко управители, които представляват заедно', 'Няколко управители, които представляват поотделно'],
+          },
+        ],
+      },
+      {
+        name: 'partners', label: 'Съдружници (собственици)', list: true, min: 1, item: 'съдружник',
+        fields: [...PARTY_FIELDS, { name: 'share', label: 'Вноска в капитала (€)', kind: 'amount', required: true }],
+      },
+      {
+        name: 'managers', label: 'Управители', list: true, min: 1, item: 'управител',
+        hint: 'Управителят подписва нотариално заверено съгласие и образец от подписа си.',
+        fields: [
+          { name: 'fullName', label: 'Три имена', required: true, max: 150, wide: true },
+          { name: 'egn', label: 'ЕГН или ЛНЧ', kind: 'egn', required: true },
+          { name: 'citizenship', label: 'Гражданство', required: true, max: 60, initial: 'българско' },
+          { name: 'address', label: 'Постоянен адрес', required: true, max: 200, wide: true },
+        ],
+      },
+    ],
+  },
+  'tr-ood-change': {
+    title: 'Промени по партидата на ООД или ЕООД в Търговския регистър',
+    intro: `Промените се вписват веднага след изтичане на 3 работни дни от подаването. Държавната такса при електронно подаване е 7,67 €. ${TR_PROCESS}`,
+    thirdParties: true,
+    summary: [{ section: 'firm', fields: ['companyName', 'eik'] }],
+    sections: [
+      {
+        name: 'firm', label: 'Дружеството',
+        fields: [
+          { name: 'companyName', label: 'Наименование', required: true, max: 200, wide: true, prefill: 'companyName' },
+          { name: 'eik', label: 'ЕИК', kind: 'eik', required: true, prefill: 'eik' },
+          { name: 'legalForm', label: 'Правна форма', kind: 'choice', required: true, options: ['ООД', 'ЕООД'] },
+          { name: 'decisionOn', label: 'Дата на решението на общото събрание или собственика', kind: 'date', hint: 'ако вече е взето' },
+        ],
+      },
+      {
+        name: 'changes', label: 'Какво се променя', list: true, min: 1, item: 'промяна', summaryField: 'subject',
+        fields: [
+          {
+            name: 'subject', label: 'Промяна', kind: 'choice', required: true, wide: true,
+            options: [
+              'Наименование',
+              'Седалище и адрес на управление',
+              'Предмет на дейност',
+              'Смяна или добавяне на управител',
+              'Напускане на управител',
+              'Прехвърляне на дружествени дялове',
+              'Приемане на нов съдружник',
+              'Прекратяване на членство на съдружник',
+              'Увеличаване на капитала',
+              'Намаляване на капитала',
+              'Преобразуване от ЕООД в ООД или обратно',
+              'Пререгистрация',
+              'Прекратяване и ликвидация',
+              'Заличаване след ликвидация',
+              'Друго',
+            ],
+          },
+          { name: 'details', label: 'Опишете промяната', required: true, max: 1000, wide: true, placeholder: 'Например: новият адрес на управление е …' },
+        ],
+      },
+      {
+        name: 'newPeople', label: 'Нови съдружници или управители', list: true, item: 'лице',
+        optional: 'Няма нови съдружници или управители',
+        fields: [
+          { name: 'role', label: 'Роля', kind: 'choice', required: true, options: ['Съдружник', 'Управител', 'Съдружник и управител'] },
+          ...PARTY_FIELDS,
+        ],
+      },
+    ],
+  },
+});
+
 export const isShown = (field, row) => {
   if (!field.showIf) return true;
   const value = row[field.showIf.field];
@@ -266,4 +385,6 @@ export const SERVICE_FORMS = {
   'Декларация по чл. 7а за доставчик на медийни услуги': 'media-7a',
   'Декларация по чл. 7б за разпространител на печатни издания': 'print-7b',
   'Декларация СПБ-2 за сметка в чужбина (БНБ)': 'bnb-spb2',
+  'Регистрация на ООД или ЕООД': 'tr-ood-new',
+  'Промени по партидата на ООД или ЕООД': 'tr-ood-change',
 };

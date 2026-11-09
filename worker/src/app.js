@@ -114,11 +114,13 @@ function publicRequest(r) {
 }
 // Кратко описание на декларацията за колоната „Описание“: без ЕГН и лични данни на трети лица.
 function formSummary(definition, data, note) {
-  const lines = [definition.title, `Дружество: ${data.company.companyName}, ЕИК ${data.company.eik}`];
+  const lines = [definition.title];
+  if (data.company?.companyName) lines.push(`Дружество: ${data.company.companyName}, ЕИК ${data.company.eik}`);
   for (const section of definition.sections.filter((s) => s.list)) {
     const value = data[section.name];
     if (value.none) lines.push(`${section.label}: неприложимо`);
     else if (section.name === 'mediaServices') lines.push(`${section.label}: ${value.rows.map((r) => `${r.name} (${r.type})`).join('; ')}`);
+    else if (section.summaryField) lines.push(`${section.label}: ${value.rows.map((r) => r[section.summaryField]).join('; ')}`);
     else lines.push(`${section.label}: ${value.rows.length}`);
   }
   for (const { section, fields } of definition.summary || []) {
@@ -1449,8 +1451,9 @@ export function createApp({ env, store, fetchImpl = (...args) => fetch(...args),
     if (formKey) {
       const { data, errors: formErrors } = validateForm(FORMS[formKey], body.form, now().toISOString().slice(0, 10));
       Object.assign(errors, formErrors);
-      if (FORMS[formKey].thirdParties && body.peopleInformed !== true) errors.peopleInformed = 'Потвърдете, че лицата в декларацията са информирани.';
-      data.company = { companyName: client.companyName, eik: client.eik, ...data.company };
+      if (FORMS[formKey].thirdParties && body.peopleInformed !== true) errors.peopleInformed = 'Потвърдете, че лицата в заявката са информирани.';
+      // Фирмените декларации се подават от името на дружеството в профила.
+      if (category.companyOnly) data.company = { companyName: client.companyName, eik: client.eik, ...data.company };
       formData = JSON.stringify(data);
       if (formData.length > MAX_FORM_CHARS) errors.form = 'Данните са твърде много за една заявка. Разделете ги или ни пишете.';
       details = formSummary(FORMS[formKey], data, details);

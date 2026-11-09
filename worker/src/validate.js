@@ -172,6 +172,8 @@ function validateFormField(field, raw, today) {
       return { value: value.toLowerCase(), error: EMAIL.test(value) ? null : 'Въведете валиден имейл.' };
     case 'egn':
       return { value, error: isValidEgnOrLnch(value) ? null : 'Въведете валидно ЕГН или ЛНЧ от 10 цифри.' };
+    case 'eik':
+      return { value, error: isValidEik(value) ? null : 'Този ЕИК/БУЛСТАТ не е валиден. Проверете цифрите.' };
     case 'date':
       return { value, error: isPastDate(value, today) ? null : 'Въведете валидна дата, която не е в бъдещето.' };
     case 'amount': {

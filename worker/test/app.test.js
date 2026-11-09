@@ -1361,6 +1361,62 @@ test('фирмените декларации са само за юридиче�
   assert.equal(res.status, 422);
 });
 
+test('регистрация на ЕООД: физическо лице подава, скритите полета не се пазят, ЕГН не влиза в описанието', async () => {
+  const { app, store } = setup();
+  await registered(app);
+  const res = await call(app, 'POST', '/api/requests', {
+    as: 'alice',
+    body: {
+      serviceCategory: 'Търговски регистър',
+      service: 'Регистрация на ООД или ЕООД',
+      peopleInformed: true,
+      form: {
+        company: {
+          legalForm: 'ЕООД – с един собственик', name: 'Пример', city: 'Варна', address: 'Варна, ул. Първа 1',
+          activity: 'Консултантски услуги', capital: '100', contribution: 'Парична', nonCash: 'остава скрито', management: 'Един управител',
+        },
+        partners: { rows: [{ partyType: 'Физическо лице', fullName: 'Иван Петров Иванов', egn: '7501020018', companyName: 'скрито', address: 'Варна', share: '100' }] },
+        managers: { rows: [{ fullName: 'Иван Петров Иванов', egn: '7501020018', citizenship: 'българско', address: 'Варна' }] },
+      },
+    },
+  });
+  assert.equal(res.status, 201, JSON.stringify(res.data));
+  const [row] = store.tables.requests;
+  assert.equal(row.formKey, 'tr-ood-new');
+  const saved = JSON.parse(row.formData);
+  assert.ok(!('company' in saved && 'eik' in saved.company));
+  assert.ok(!('nonCash' in saved.company));
+  assert.ok(!('companyName' in saved.partners.rows[0]));
+  assert.equal(saved.company.capital, '100.00');
+  assert.ok(row.details.includes('Пример') && !row.details.includes('7501020018'));
+  assert.equal(res.data.request.form.managers.rows[0].egn, '••••••••18');
+});
+
+test('промени по партидата: ЕИК се проверява, а видовете промени влизат в описанието', async () => {
+  const { app, store } = setup();
+  await call(app, 'POST', '/api/register', { as: 'bob', body: company });
+  const body = {
+    serviceCategory: 'Търговски регистър',
+    service: 'Промени по партидата на ООД или ЕООД',
+    peopleInformed: true,
+    form: {
+      firm: { companyName: 'Пример ООД', eik: '123456787', legalForm: 'ООД' },
+      changes: { rows: [{ subject: 'Седалище и адрес на управление', details: 'Нов адрес: Варна, ул. Втора 2' }] },
+      newPeople: {},
+    },
+  };
+  const bad = await call(app, 'POST', '/api/requests', { as: 'bob', body });
+  assert.equal(bad.status, 422);
+  assert.ok(bad.data.error.fields['form.firm.eik']);
+  assert.ok(bad.data.error.fields['form.newPeople']);
+
+  body.form.firm.eik = '123456786';
+  body.form.newPeople = { none: true };
+  const res = await call(app, 'POST', '/api/requests', { as: 'bob', body });
+  assert.equal(res.status, 201, JSON.stringify(res.data));
+  assert.ok(store.tables.requests[0].details.includes('Какво се променя: Седалище и адрес на управление'));
+});
+
 test('СПБ-2: скритите полета не се пазят, валутата и процентите се нормализират', async () => {
   const { app, store } = setup();
   await call(app, 'POST', '/api/register', { as: 'bob', body: company });

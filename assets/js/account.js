@@ -3,7 +3,7 @@ import {
   icon, identityFields, isShown, uploadFile,
   loginLabel, markClean, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill, timeAgo,
   toast, tracker,
-} from './core.js?v=876d4f41e2';
+} from './core.js?v=356a7b4f34';
 
 let main;
 let state;
@@ -154,12 +154,12 @@ function declarationEditor(definition, client, data) {
           f.options.map((o) => h('option', { value: o, selected: row[f.name] === o }, o))));
     }
     const types = { email: 'email', date: 'date' };
-    const inputmode = { egn: 'numeric', amount: 'decimal', percent: 'decimal' }[f.kind];
+    const inputmode = { egn: 'numeric', eik: 'numeric', amount: 'decimal', percent: 'decimal' }[f.kind];
     return h('div', { class: wrap },
       h('label', { for: id }, label),
       h('input', {
         id, name, type: types[f.kind] || 'text', value: row[f.name] || '', inputmode,
-        maxlength: f.kind === 'egn' ? 10 : f.kind === 'currency' ? 3 : f.max || 200,
+        maxlength: { egn: 10, eik: 13, currency: 3 }[f.kind] || f.max || 200,
         autocomplete: f.kind === 'egn' ? 'off' : null,
         placeholder: f.placeholder || (f.kind === 'egn' ? '10 цифри' : null),
         oninput: (e) => { row[f.name] = e.target.value; },
@@ -328,7 +328,8 @@ function viewNew() {
     const form = h('form', { class: 'form', novalidate: true },
       h('div', { class: 'summary' },
         h('span', { class: 'option__icon' }, icon(CATEGORY_ICONS[draft.category.name] || 'doc', 22)),
-        h('div', {}, h('strong', {}, definition.title), h('p', { class: 'muted small' }, `${c.companyName}, ЕИК ${c.eik}`))),
+        h('div', {}, h('strong', {}, definition.title),
+          h('p', { class: 'muted small' }, c.companyName ? `${c.companyName}, ЕИК ${c.eik}` : [c.firstName, c.lastName].filter(Boolean).join(' ')))),
       definition.intro && h('div', { class: 'alert alert--warn' }, definition.intro),
       declarationEditor(definition, c, draft.form),
       h('div', { class: 'field' },
@@ -342,9 +343,9 @@ function viewNew() {
           type: 'checkbox', name: 'peopleInformed', checked: draft.peopleInformed,
           onchange: (e) => { draft.peopleInformed = e.target.checked; },
         }),
-        h('span', {}, 'Потвърждавам, че лицата, чиито данни посочвам, знаят, че ги предоставям на БУЛАДМИН за подаване на декларацията. ',
+        h('span', {}, 'Потвърждавам, че лицата, чиито данни посочвам, знаят, че ги предоставям на БУЛАДМИН за изпълнението на услугата. ',
           h('a', { href: '/privacy.html#declarations', target: '_blank' }, 'Политика за лични данни')))),
-      h('p', { class: 'small muted' }, 'След като подготвим декларацията, ще Ви я изпратим за проверка и подпис.'),
+      h('p', { class: 'small muted' }, 'След като подготвим документите, ще Ви ги изпратим през портала за проверка и подпис.'),
       alert,
       h('div', { class: 'row' }, back(2), submit));
     form.addEventListener('submit', async (event) => {
