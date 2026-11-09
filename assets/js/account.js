@@ -3,7 +3,7 @@ import {
   icon, identityFields, isShown, uploadFile,
   loginLabel, markClean, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill, timeAgo,
   toast, tracker,
-} from './core.js?v=d37ae0875d';
+} from './core.js?v=876d4f41e2';
 
 let main;
 let state;
@@ -215,7 +215,8 @@ function declarationEditor(definition, client, data) {
 }
 
 function viewNew() {
-  const { forms, serviceForms } = state.meta;
+  // По-старо API не връща формите; тогава всички услуги се заявяват със свободно описание.
+  const { forms = {}, serviceForms = {} } = state.meta;
   const c = state.client;
   const catalog = state.meta.catalog.filter((category) => !category.companyOnly || isCompany(c));
   const draft = { category: null, service: '', details: '', identityNumber: '', form: null, peopleInformed: false };
@@ -535,7 +536,7 @@ async function viewRequest(id) {
     h('div', { class: 'split' },
       h('div', { class: 'stack' },
         h('div', { class: 'card stack' }, tracker(r.requestStatus), h('p', { class: 'pre' }, r.details)),
-        r.form && state.meta.forms[r.formKey] && h('details', { class: 'card' },
+        r.form && state.meta.forms?.[r.formKey] && h('details', { class: 'card' },
           h('summary', {}, 'Данни в декларацията'), formView(state.meta.forms[r.formKey], r.form)),
         receivedSection(files),
         documentsSection(id, documents, files),

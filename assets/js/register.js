@@ -1,4 +1,4 @@
-import { api, contactFields, fatal, formValues, h, icon, identityFields, mount, showError, showFieldErrors } from './core.js?v=d37ae0875d';
+import { api, contactFields, fatal, formValues, h, icon, identityFields, mount, showError, showFieldErrors } from './core.js?v=876d4f41e2';
 
 async function init() {
   const me = await api('/me');

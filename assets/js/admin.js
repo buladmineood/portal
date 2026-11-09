@@ -3,7 +3,7 @@ import {
   identityFields, linkBox,
   loginLabel, markClean, markDirty, mount, mountShell, pageHead, progress, securityCards, showError, showFieldErrors, showUpdateBar, startLive, statusPill,
   timeAgo, toast, uploadFile,
-} from './core.js?v=d37ae0875d';
+} from './core.js?v=876d4f41e2';
 
 let shell;
 let main;
@@ -560,7 +560,7 @@ async function viewRequest(id) {
           progress(r.requestStatus),
           h('h2', { class: 'card__title' }, 'Описание от клиента'),
           h('p', { class: 'pre' }, r.details)),
-        r.form && meta.forms[r.formKey] && declarationCard(id, meta.forms[r.formKey], r.form),
+        r.form && meta.forms?.[r.formKey] && declarationCard(id, meta.forms[r.formKey], r.form),
         operatorDocuments(id, detail.documents || [], detail.files || []),
         outgoingDocuments(id, detail.files || []),
         h('section', { class: 'stack', 'aria-labelledby': 'history-title' },

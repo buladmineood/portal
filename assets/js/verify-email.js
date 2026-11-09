@@ -1,4 +1,4 @@
-import { api, h, showError } from './core.js?v=d37ae0875d';
+import { api, h, showError } from './core.js?v=876d4f41e2';
 
 // Потвърждава се с бутон, а не при отваряне: пощенските програми сами отварят линковете при проверка за вируси.
 const STORAGE_KEY = 'ba_verify_token';
